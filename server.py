@@ -654,7 +654,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Enhanced Tunnel Server - Single Port Version')
     parser.add_argument('--host', default='0.0.0.0', help='Host to bind to')
     parser.add_argument('--port', type=int, default=int(os.environ.get('PORT', 8080)), help='Port to bind to')
-    parser.add_argument('--domain', default='tunnel-server-latest.onrender.com', help='Your domain name')
+    parser.add_argument('--domain', default='tunnel-w4h5.onrender.com', help='Your domain name')
     parser.add_argument('--ssl-cert', help='Path to SSL certificate file')
     parser.add_argument('--ssl-key', help='Path to SSL private key file')
     parser.add_argument('--no-auto-ssl', action='store_true', help='Disable automatic SSL detection')
