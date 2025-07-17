@@ -25,10 +25,7 @@ from urllib.parse import urlparse
 from aiohttp.web_ws import WebSocketResponse
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class TunnelServer:
@@ -73,15 +70,9 @@ class TunnelServer:
             logger.info("SSL enabled via environment variables")
             return True
             
-        # Check for Render.com specific environment - Render provides SSL termination
-        if os.environ.get('RENDER') or '.onrender.com' in self.domain:
+        # Check for Render.com specific environment
+        if os.environ.get('RENDER'):
             logger.info("SSL enabled - detected Render.com environment")
-            return True
-            
-        # Check for other cloud platforms
-        if (os.environ.get('HEROKU') or '.herokuapp.com' in self.domain or 
-            '.netlify.app' in self.domain or '.vercel.app' in self.domain):
-            logger.info("SSL enabled - detected cloud platform")
             return True
             
         # Check for certificate files
@@ -92,10 +83,40 @@ class TunnelServer:
             else:
                 logger.warning("SSL certificate files specified but not found")
                 
+        # Check for common certificate locations
+        common_cert_paths = [
+            '/etc/ssl/certs/server.crt',
+            '/etc/letsencrypt/live/*/fullchain.pem',
+            './ssl/cert.pem',
+            './cert.pem'
+        ]
+        
+        common_key_paths = [
+            '/etc/ssl/private/server.key',
+            '/etc/letsencrypt/live/*/privkey.pem',
+            './ssl/key.pem',
+            './key.pem'
+        ]
+        
+        for cert_path in common_cert_paths:
+            for key_path in common_key_paths:
+                if os.path.exists(cert_path) and os.path.exists(key_path):
+                    self.ssl_cert = cert_path
+                    self.ssl_key = key_path
+                    logger.info(f"SSL enabled - found certificates at {cert_path} and {key_path}")
+                    return True
+                    
         # Check if running on standard HTTPS port
         if self.port == 443:
             logger.info("SSL enabled - running on port 443")
             return True
+            
+        # Check if domain suggests HTTPS (like render.com, herokuapp.com, etc.)
+        https_domains = ['.onrender.com', '.herokuapp.com', '.netlify.app', '.vercel.app']
+        for https_domain in https_domains:
+            if https_domain in self.domain:
+                logger.info(f"SSL enabled - detected HTTPS-enabled domain: {self.domain}")
+                return True
                 
         logger.info("SSL disabled - no SSL configuration detected")
         return False
@@ -314,25 +335,21 @@ class TunnelServer:
 
     async def websocket_handler(self, request: Request) -> WebSocketResponse:
         """Handle WebSocket upgrade requests"""
-        try:
-            ws = WebSocketResponse(
-                protocols=('chat',),
-                heartbeat=30,
-                timeout=30
-            )
-            await ws.prepare(request)
-            
-            # Handle the WebSocket connection
-            await self.handle_websocket_connection(ws)
-            
-            return ws
-        except Exception as e:
-            logger.error(f"Error in websocket handler: {e}")
-            raise
+        ws = WebSocketResponse(
+            protocols=('chat',),
+            heartbeat=30,
+            timeout=30
+        )
+        await ws.prepare(request)
+        
+        # Handle the WebSocket connection
+        await self.handle_websocket_connection(ws)
+        
+        return ws
 
     async def handle_http_request(self, request: Request) -> Response:
         """Handle HTTP requests and forward them to appropriate tunnel"""
-        client_ip = request.remote or "unknown"
+        client_ip = request.remote
         host = request.headers.get('host', '')
 
         try:
@@ -515,14 +532,6 @@ class TunnelServer:
                 logger.error(f"Dead tunnel cleanup error: {e}")
                 await asyncio.sleep(self.cleanup_interval)
 
-    async def health_check_handler(self, request: Request) -> Response:
-        """Health check endpoint for deployment platforms"""
-        return web.Response(
-            text="OK",
-            status=200,
-            headers={'Content-Type': 'text/plain'}
-        )
-
     async def status_handler(self, request: Request) -> Response:
         """Handle status requests"""
         try:
@@ -571,25 +580,16 @@ class TunnelServer:
     async def start_server(self):
         """Start the tunnel server"""
         try:
-            # Use PORT environment variable if available (for Render.com)
-            port = int(os.environ.get('PORT', self.port))
-            
-            logger.info(f"Starting server on {self.host}:{port}")
-            
-            # Check if port is available (only if not using environment PORT)
-            if not os.environ.get('PORT') and not self.check_port_availability(port):
-                logger.error(f"Port {port} is already in use")
-                raise RuntimeError(f"Port {port} is already in use")
+            # Check if port is available
+            if not self.check_port_availability(self.port):
+                logger.error(f"Port {self.port} is already in use")
+                raise RuntimeError(f"Port {self.port} is already in use")
 
             # Create HTTP application
-            app = web.Application(
-                client_max_size=1024*1024*10,  # 10MB max request size
-                client_timeout=30
-            )
+            app = web.Application(client_max_size=1024*1024*10)  # 10MB max request size
 
-            # Add health check endpoint first
-            app.router.add_get('/health', self.health_check_handler)
-            app.router.add_get('/status', self.status_handler)
+            # Add routes (order matters!)
+            same_head = app.router.add_get('/status', self.status_handler)
             app.router.add_get('/ws', self.websocket_handler)  # WebSocket endpoint
 
             # Add CORS support
@@ -602,11 +602,10 @@ class TunnelServer:
                 )
             })
 
-            # Add CORS to all routes
-            for route in list(app.router.routes()):
-                cors.add(route)
+            # Add CORS to status route
+            cors.add(same_head)
 
-            # Add catch-all route for tunnel traffic (must be last)
+            # Add catch-all route for tunnel traffic
             app.router.add_route('*', '/{path:.*}', self.handle_http_request)
 
             # Start cleanup tasks
@@ -617,6 +616,9 @@ class TunnelServer:
             runner = web.AppRunner(app)
             await runner.setup()
             
+            # Use PORT environment variable if available (for Render.com)
+            port = int(os.environ.get('PORT', self.port))
+            
             site = web.TCPSite(runner, self.host, port)
             await site.start()
 
@@ -625,14 +627,12 @@ class TunnelServer:
             logger.info(f"  Domain: {self.domain}")
             logger.info(f"  WebSocket endpoint: {self.get_public_websocket_url()}")
             logger.info(f"  Status endpoint: {self.protocol}://{self.host}:{port}/status")
-            logger.info(f"  Health check: {self.protocol}://{self.host}:{port}/health")
 
             # Keep server running
             try:
                 await asyncio.gather(
                     cleanup_task,
-                    dead_tunnel_task,
-                    return_exceptions=True
+                    dead_tunnel_task
                 )
             except KeyboardInterrupt:
                 logger.info("Shutting down gracefully...")
@@ -654,7 +654,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Enhanced Tunnel Server - Single Port Version')
     parser.add_argument('--host', default='0.0.0.0', help='Host to bind to')
     parser.add_argument('--port', type=int, default=int(os.environ.get('PORT', 8080)), help='Port to bind to')
-    parser.add_argument('--domain', default='tunnel-server-decm.onrender.com', help='Your domain name')
+    parser.add_argument('--domain', default='tunnel-server-latest.onrender.com', help='Your domain name')
     parser.add_argument('--ssl-cert', help='Path to SSL certificate file')
     parser.add_argument('--ssl-key', help='Path to SSL private key file')
     parser.add_argument('--no-auto-ssl', action='store_true', help='Disable automatic SSL detection')
