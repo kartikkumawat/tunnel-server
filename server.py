@@ -1217,7 +1217,7 @@ async def main():
 
     parser = argparse.ArgumentParser(description='Enhanced Flask Tunnel Server')
     parser.add_argument('--host', default='0.0.0.0', help='Host to bind to')
-    parser.add_argument('--port', type=int, default=8080, help='Port to bind to')
+    parser.add_argument('--port', type=int, default=int(os.environ.get('PORT', 8080)), help='Port to bind to')
     parser.add_argument('--domain', default='tunnel-server-decm.onrender.com', help='Public domain')
     parser.add_argument('--ssl-cert', help='SSL certificate file')
     parser.add_argument('--ssl-key', help='SSL key file')
