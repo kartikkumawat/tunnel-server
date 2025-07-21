@@ -348,7 +348,7 @@ class UltraHighPerformanceTunnelServer:
 
         # For deployment platforms, use the provided domain directly
         if any(platform in domain for platform in ['.onrender.com', '.herokuapp.com', '.netlify.app', '.vercel.app']):
-            return f"https://{subdomain}-{domain}"
+            return f"https://{subdomain}.{domain}"
 
         # For custom domains with subdomains
         port_str = ""
@@ -384,20 +384,23 @@ class UltraHighPerformanceTunnelServer:
 
         host_clean = host.split(':')[0].lower()
 
-        # For deployment platforms like Render (subdomain-domain.onrender.com)
-        if any(platform in host_clean for platform in ['.onrender.com', '.herokuapp.com']):
-            parts = host_clean.split('-')
-            if len(parts) > 1:
-                return parts[0]
-        else:
-            # For traditional subdomains (subdomain.domain.com)
-            domain_suffix = f".{self.domain}"
-            if not host_clean.endswith(domain_suffix):
-                return None
-            subdomain = host_clean[:-len(domain_suffix)]
-            return subdomain if subdomain else None
+        # Normalize domain for comparison
+        domain = self.domain
+        if domain.startswith('http://') or domain.startswith('https://'):
+            parsed = urlparse(domain)
+            domain = parsed.netloc
+            if parsed.port:
+                domain = f"{parsed.hostname}:{parsed.port}"
 
-        return None
+        # For ALL domains, use traditional subdomain format (subdomain.domain.com)
+        domain_suffix = f".{domain}"
+
+        if not host_clean.endswith(domain_suffix):
+            return None
+
+        subdomain = host_clean[:-len(domain_suffix)]
+        return subdomain if subdomain else None
+
 
     def check_rate_limit(self, tunnel_id: str) -> bool:
         """NO RATE LIMITING - Always allow"""
