@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 
 """
-Ultra High-Performance Tunnel Server - Unlimited Capacity
+Ultra High-Performance Tunnel Server with SSL Support - Unlimited Capacity
 Supports unlimited timeout, unlimited connections, 100TB+ data transfers
-No limits on HTTP/HTTPS/WebSocket/SSE services
+No limits on HTTP/HTTPS/WebSocket/SSE services with SSL auto-detection
 """
 
 import asyncio
@@ -16,6 +16,8 @@ import os
 import sys
 import uuid
 import base64
+import ssl
+import socket
 from typing import Dict, Optional, Set, Tuple
 from datetime import datetime, timedelta
 from collections import defaultdict, deque
@@ -185,12 +187,16 @@ class TunnelRegistry:
         return f"{company}{int(time.time())}{str(uuid.uuid4())[:8]}"
 
 class UltraHighPerformanceTunnelServer:
-    """Main tunnel server optimized for unlimited capacity and performance"""
+    """Main tunnel server optimized for unlimited capacity and performance with SSL"""
 
-    def __init__(self, host='0.0.0.0', port=8080, domain='localhost'):
+    def __init__(self, host='0.0.0.0', port=8080, domain='localhost',
+                 ssl_cert=None, ssl_key=None, auto_detect_ssl=True):
         self.host = host
         self.port = port
         self.domain = self._normalize_domain(domain)
+        self.ssl_cert = ssl_cert
+        self.ssl_key = ssl_key
+        self.auto_detect_ssl = auto_detect_ssl
 
         # UNLIMITED SETTINGS - No limits on anything
         self.max_tunnels = None  # Unlimited tunnels
@@ -202,8 +208,9 @@ class UltraHighPerformanceTunnelServer:
         self.metrics = PerformanceMetrics()
         self.pending_requests: Dict[str, asyncio.Future] = {}
 
-        # Cloud platform detection and SSL
-        self.use_ssl = self._detect_ssl()
+        # SSL detection and configuration
+        self.use_ssl = self._detect_ssl_setup()
+        self.ssl_context = self._create_ssl_context() if self.use_ssl else None
         self.protocol = 'https' if self.use_ssl else 'http'
         self.ws_protocol = 'wss' if self.use_ssl else 'ws'
 
@@ -211,13 +218,15 @@ class UltraHighPerformanceTunnelServer:
         self.rate_limiters: Dict[str, dict] = {}
         self.rate_limit_requests = float('inf')  # Unlimited
         self.rate_limit_window = 1  # Minimal window
-
         self.running = False
         self.cleanup_tasks = []
 
-        logger.info("[INIT] Ultra High-Performance Tunnel Server initialized")
+        logger.info("[INIT] Ultra High-Performance Tunnel Server with SSL initialized")
         logger.info("[INIT] UNLIMITED MODE: No timeouts, no connection limits, 100TB+ support")
         logger.info(f"[INIT] SSL: {'Enabled' if self.use_ssl else 'Disabled'}")
+        if self.use_ssl and self.ssl_cert:
+            logger.info(f"[INIT] SSL Certificate: {self.ssl_cert}")
+        logger.info(f"[INIT] Protocol: {self.protocol} | WebSocket: {self.ws_protocol}")
 
     def _normalize_domain(self, domain: str) -> str:
         """Normalize domain by removing protocol"""
@@ -225,23 +234,148 @@ class UltraHighPerformanceTunnelServer:
             return urlparse(domain).netloc
         return domain
 
-    def _detect_ssl(self) -> bool:
-        """Detect SSL configuration for cloud platforms"""
-        # Cloud platforms typically provide SSL
-        cloud_indicators = ['RENDER', 'HEROKU', 'RAILWAY', 'VERCEL', 'NETLIFY', 'FLYIO']
-        if any(os.environ.get(indicator) for indicator in cloud_indicators):
+    def _detect_ssl_setup(self) -> bool:
+        """Auto-detect SSL configuration based on environment and certificates"""
+        if not self.auto_detect_ssl:
+            logger.info("[SSL] Auto-detection disabled")
+            return False
+
+        # Check for environment variables (common in deployment platforms)
+        if os.environ.get('HTTPS') == 'true' or os.environ.get('USE_SSL') == 'true':
+            logger.info("[SSL] Enabled via environment variables")
             return True
 
-        return (
-            self.port == 443 or
-            os.environ.get('USE_SSL', '').lower() == 'true' or
-            os.environ.get('HTTPS', '').lower() == 'true'
-        )
+        # Check for cloud platform specific environments
+        cloud_indicators = ['RENDER', 'HEROKU', 'RAILWAY', 'VERCEL', 'NETLIFY', 'FLY_IO']
+        detected_platform = None
+        for indicator in cloud_indicators:
+            if os.environ.get(indicator):
+                detected_platform = indicator
+                break
+
+        if detected_platform:
+            logger.info(f"[SSL] Enabled - detected {detected_platform} environment")
+            return True
+
+        # Check for certificate files
+        if self.ssl_cert and self.ssl_key:
+            if os.path.exists(self.ssl_cert) and os.path.exists(self.ssl_key):
+                logger.info("[SSL] Enabled via certificate files")
+                return True
+            else:
+                logger.warning("[SSL] Certificate files specified but not found")
+
+        # Check for common certificate locations
+        common_cert_paths = [
+            '/etc/ssl/certs/server.crt',
+            '/etc/letsencrypt/live/*/fullchain.pem',
+            './ssl/cert.pem',
+            './cert.pem',
+            'fullchain.pem'
+        ]
+
+        common_key_paths = [
+            '/etc/ssl/private/server.key',
+            '/etc/letsencrypt/live/*/privkey.pem',
+            './ssl/key.pem',
+            './key.pem',
+            'privkey.pem'
+        ]
+
+        for cert_path in common_cert_paths:
+            for key_path in common_key_paths:
+                if os.path.exists(cert_path) and os.path.exists(key_path):
+                    self.ssl_cert = cert_path
+                    self.ssl_key = key_path
+                    logger.info(f"[SSL] Enabled - found certificates at {cert_path} and {key_path}")
+                    return True
+
+        # Check if running on standard HTTPS port
+        if self.port == 443:
+            logger.info("[SSL] Enabled - running on port 443")
+            return True
+
+        # Check if domain suggests HTTPS
+        https_domains = ['.onrender.com', '.herokuapp.com', '.netlify.app', '.vercel.app',
+                        '.railway.app', '.fly.dev']
+        for https_domain in https_domains:
+            if https_domain in self.domain:
+                logger.info(f"[SSL] Enabled - detected HTTPS-enabled domain: {self.domain}")
+                return True
+
+        logger.info("[SSL] Disabled - no SSL configuration detected")
+        return False
+
+    def _create_ssl_context(self) -> Optional[ssl.SSLContext]:
+        """Create SSL context if certificates are available"""
+        try:
+            if not self.ssl_cert or not self.ssl_key:
+                logger.info("[SSL] No certificates specified, relying on reverse proxy SSL")
+                return None
+
+            if not (os.path.exists(self.ssl_cert) and os.path.exists(self.ssl_key)):
+                logger.warning("[SSL] Certificate files not found, SSL context not created")
+                return None
+
+            context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+            context.load_cert_chain(self.ssl_cert, self.ssl_key)
+            logger.info("[SSL] SSL context created successfully")
+            return context
+
+        except Exception as e:
+            logger.error(f"[SSL] Error creating SSL context: {e}")
+            return None
+
+    def check_port_availability(self, port: int) -> bool:
+        """Check if a port is available for binding"""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind((self.host, port))
+                return True
+        except OSError:
+            return False
 
     def get_public_url(self, subdomain: str) -> str:
-        """Generate public URL for subdomain"""
-        port_str = f":{self.port}" if self.port not in [80, 443] else ""
-        return f"{self.protocol}://{subdomain}.{self.domain}{port_str}"
+        """Generate public URL for subdomain with SSL support"""
+        # Handle the case where domain includes protocol
+        domain = self.domain
+        if domain.startswith('http://') or domain.startswith('https://'):
+            parsed = urlparse(domain)
+            domain = parsed.netloc
+            if parsed.port:
+                domain = f"{parsed.hostname}:{parsed.port}"
+
+        # For deployment platforms, use the provided domain directly
+        if any(platform in domain for platform in ['.onrender.com', '.herokuapp.com', '.netlify.app', '.vercel.app']):
+            return f"https://{subdomain}-{domain}"
+
+        # For custom domains with subdomains
+        port_str = ""
+        if (self.use_ssl and self.port != 443) or (not self.use_ssl and self.port != 80):
+            port_str = f":{self.port}"
+
+        return f"{self.protocol}://{subdomain}.{domain}{port_str}"
+
+    def get_public_websocket_url(self) -> str:
+        """Get the public WebSocket URL for clients"""
+        domain = self.domain
+        if domain.startswith('http://') or domain.startswith('https://'):
+            parsed = urlparse(domain)
+            domain = parsed.netloc
+            if parsed.port:
+                domain = f"{parsed.hostname}:{parsed.port}"
+
+        # For deployment platforms
+        if any(platform in domain for platform in ['.onrender.com', '.herokuapp.com']):
+            return f"wss://{domain}/ws"
+
+        # For custom domains
+        port_str = ""
+        if (self.use_ssl and self.port != 443) or (not self.use_ssl and self.port != 80):
+            port_str = f":{self.port}"
+
+        return f"{self.ws_protocol}://{domain}{port_str}/ws"
 
     def _extract_subdomain(self, host: str) -> Optional[str]:
         """Extract subdomain from Host header with high performance"""
@@ -249,20 +383,28 @@ class UltraHighPerformanceTunnelServer:
             return None
 
         host_clean = host.split(':')[0].lower()
-        domain_suffix = f".{self.domain}"
 
-        if not host_clean.endswith(domain_suffix):
-            return None
+        # For deployment platforms like Render (subdomain-domain.onrender.com)
+        if any(platform in host_clean for platform in ['.onrender.com', '.herokuapp.com']):
+            parts = host_clean.split('-')
+            if len(parts) > 1:
+                return parts[0]
+        else:
+            # For traditional subdomains (subdomain.domain.com)
+            domain_suffix = f".{self.domain}"
+            if not host_clean.endswith(domain_suffix):
+                return None
+            subdomain = host_clean[:-len(domain_suffix)]
+            return subdomain if subdomain else None
 
-        subdomain = host_clean[:-len(domain_suffix)]
-        return subdomain if subdomain else None
+        return None
 
     def check_rate_limit(self, tunnel_id: str) -> bool:
         """NO RATE LIMITING - Always allow"""
         return True  # Unlimited requests always allowed
 
     async def websocket_handler(self, request: Request) -> WebSocketResponse:
-        """Ultra WebSocket handler - unlimited capacity"""
+        """Ultra WebSocket handler - unlimited capacity with SSL support"""
         # UNLIMITED WebSocket settings
         ws = WebSocketResponse(
             heartbeat=None,  # No heartbeat timeout
@@ -277,7 +419,7 @@ class UltraHighPerformanceTunnelServer:
 
         try:
             self.metrics.active_connections += 1
-            logger.info(f"[WS] New unlimited WebSocket connection from {client_ip}")
+            logger.info(f"[WS] New unlimited WebSocket connection from {client_ip} (SSL: {self.use_ssl})")
 
             async for msg in ws:
                 if msg.type == web.WSMsgType.TEXT:
@@ -293,19 +435,15 @@ class UltraHighPerformanceTunnelServer:
                             await self._handle_heartbeat(tunnel_id, ws)
                         else:
                             logger.debug(f"[WS] Message type: {msg_type}")
-
                     except json.JSONDecodeError:
                         logger.error(f"[WS] Invalid JSON from {client_ip}")
                     except Exception as e:
                         logger.error(f"[WS] Message processing error: {e}")
-
                 elif msg.type == web.WSMsgType.ERROR:
                     logger.error(f"[WS] WebSocket error: {ws.exception()}")
                     break
-
         except Exception as e:
             logger.error(f"[WS] WebSocket handler error: {e}")
-
         finally:
             self.metrics.active_connections -= 1
             if tunnel_id:
@@ -315,8 +453,8 @@ class UltraHighPerformanceTunnelServer:
         return ws
 
     async def _handle_registration(self, data: dict, ws: WebSocketResponse,
-                                  client_ip: str) -> Optional[str]:
-        """Handle tunnel registration - unlimited capacity"""
+                                 client_ip: str) -> Optional[str]:
+        """Handle tunnel registration - unlimited capacity with SSL URLs"""
         local_port = data.get('local_port')
         company = data.get('company', 'default')
         client_id = data.get('client_id')
@@ -327,7 +465,6 @@ class UltraHighPerformanceTunnelServer:
             return None
 
         # NO CAPACITY LIMITS - Accept unlimited tunnels
-
         # Generate or reuse client ID
         if not client_id:
             client_id = str(uuid.uuid4())
@@ -347,8 +484,9 @@ class UltraHighPerformanceTunnelServer:
         )
 
         public_url = self.get_public_url(subdomain)
+        websocket_url = self.get_public_websocket_url()
 
-        # Include client_id in response
+        # Include client_id in response with SSL info
         await ws.send_json({
             'type': 'registered',
             'tunnel_id': tunnel_id,
@@ -356,10 +494,17 @@ class UltraHighPerformanceTunnelServer:
             'public_url': public_url,
             'subdomain': subdomain,
             'company': company,
-            'server_info': {'version': '3.0', 'platform': 'unlimited'}
+            'websocket_url': websocket_url,
+            'protocol': self.protocol,
+            'ssl_enabled': self.use_ssl,
+            'server_info': {
+                'version': '3.0',
+                'platform': 'unlimited',
+                'ssl_support': True
+            }
         })
 
-        logger.info(f"[REGISTER] Unlimited tunnel registered: {public_url} -> localhost:{local_port}")
+        logger.info(f"[REGISTER] Unlimited tunnel registered: {public_url} -> localhost:{local_port} (SSL: {self.use_ssl})")
         return tunnel_id
 
     async def _handle_response(self, data: dict):
@@ -374,10 +519,10 @@ class UltraHighPerformanceTunnelServer:
         """Handle heartbeat with performance tracking"""
         if tunnel_id in self.registry.tunnels:
             self.registry.tunnels[tunnel_id]['last_seen'] = time.time()
-        await ws.send_json({'type': 'heartbeat_ack'})
+            await ws.send_json({'type': 'heartbeat_ack'})
 
     async def http_handler(self, request: Request) -> Response:
-        """Ultra high-performance HTTP handler - unlimited capacity"""
+        """Ultra high-performance HTTP handler - unlimited capacity with SSL"""
         start_time = time.time()
         host = request.headers.get('host', '')
 
@@ -405,7 +550,6 @@ class UltraHighPerformanceTunnelServer:
             )
 
         # NO RATE LIMITING - Accept all requests
-
         try:
             # Forward request with unlimited streaming support
             response = await self._forward_request(request, tunnel)
@@ -417,7 +561,7 @@ class UltraHighPerformanceTunnelServer:
             tunnel['request_count'] += 1
             tunnel['bytes_transferred'] += body_size
 
-            logger.debug(f"[HTTP] {request.method} {request.path_qs} -> {subdomain} ({response.status}) [{duration:.3f}s]")
+            logger.debug(f"[HTTP] {request.method} {request.path_qs} -> {subdomain} ({response.status}) [{duration:.3f}s] SSL: {self.use_ssl}")
             return response
 
         except Exception as e:
@@ -435,13 +579,18 @@ class UltraHighPerformanceTunnelServer:
             return web.json_response({
                 'status': 'healthy',
                 'timestamp': time.time(),
-                'platform': 'unlimited'
+                'platform': 'unlimited',
+                'ssl_enabled': self.use_ssl,
+                'protocol': self.protocol
             })
         elif path == 'metrics':
             return await self._metrics_handler(request)
         else:
             return web.Response(
-                text=f"Ultra Tunnel Server - UNLIMITED MODE\nVisit /status for active tunnels",
+                text=f"Ultra Tunnel Server - UNLIMITED MODE with SSL\n"
+                     f"Protocol: {self.protocol}\n"
+                     f"SSL: {'Enabled' if self.use_ssl else 'Disabled'}\n"
+                     f"Visit /status for active tunnels",
                 status=404,
                 headers={'Content-Type': 'text/plain'}
             )
@@ -454,7 +603,6 @@ class UltraHighPerformanceTunnelServer:
         try:
             body = await request.read()
             # NO SIZE LIMIT - Accept 100TB+ bodies
-
         except Exception as e:
             logger.error(f"[FORWARD] Error reading body: {e}")
             body = b''
@@ -522,7 +670,7 @@ class UltraHighPerformanceTunnelServer:
             self.pending_requests.pop(request_id, None)
 
     async def _status_handler(self, request: Request) -> Response:
-        """Status endpoint with comprehensive metrics"""
+        """Status endpoint with comprehensive metrics including SSL info"""
         uptime = time.time() - self.metrics.start_time
 
         tunnels_info = []
@@ -536,13 +684,21 @@ class UltraHighPerformanceTunnelServer:
                 'uptime': time.time() - tunnel['created_at'],
                 'requests': tunnel['request_count'],
                 'bytes_transferred': tunnel['bytes_transferred'],
-                'active_requests': tunnel['active_requests']
+                'active_requests': tunnel['active_requests'],
+                'ssl_enabled': self.use_ssl
             })
 
         status_data = {
             'status': 'running',
             'platform': 'unlimited',
-            'mode': 'UNLIMITED_CAPACITY',
+            'mode': 'UNLIMITED_CAPACITY_SSL',
+            'ssl_info': {
+                'enabled': self.use_ssl,
+                'protocol': self.protocol,
+                'websocket_protocol': self.ws_protocol,
+                'certificate_path': self.ssl_cert if self.ssl_cert else None,
+                'auto_detection': self.auto_detect_ssl
+            },
             'uptime_seconds': uptime,
             'active_tunnels': len(self.registry.tunnels),
             'active_connections': self.metrics.active_connections,
@@ -556,6 +712,10 @@ class UltraHighPerformanceTunnelServer:
                 'request_timeout': 'UNLIMITED',
                 'max_body_size': 'UNLIMITED (100TB+)',
                 'rate_limit': 'DISABLED'
+            },
+            'urls': {
+                'websocket': self.get_public_websocket_url(),
+                'base': f"{self.protocol}://{self.domain}:{self.port}" if self.port not in [80, 443] else f"{self.protocol}://{self.domain}"
             },
             'tunnels': tunnels_info
         }
@@ -579,9 +739,11 @@ tunnel_server_bytes_transferred_total {self.metrics.bytes_transferred}
 # HELP tunnel_server_error_rate Request error rate
 tunnel_server_error_rate {self.metrics.error_count / max(self.metrics.request_count, 1)}
 
+# HELP tunnel_server_ssl_enabled SSL status
+tunnel_server_ssl_enabled {1 if self.use_ssl else 0}
+
 # HELP tunnel_server_mode Server operation mode
 tunnel_server_mode{{mode="unlimited"}} 1
-
 """
         return web.Response(text=metrics_text, content_type='text/plain')
 
@@ -602,8 +764,13 @@ tunnel_server_mode{{mode="unlimited"}} 1
                 logger.info(f"[CLEANUP] Cleaned up stale tunnel: {tunnel_id}")
 
     async def start_server(self):
-        """Start the ultra high-performance tunnel server"""
+        """Start the ultra high-performance tunnel server with SSL"""
         self.running = True
+
+        # Check if port is available
+        if not self.check_port_availability(self.port):
+            logger.error(f"[START] Port {self.port} is already in use")
+            raise RuntimeError(f"Port {self.port} is already in use")
 
         # Create aiohttp application with UNLIMITED settings
         app = web.Application(
@@ -627,7 +794,11 @@ tunnel_server_mode{{mode="unlimited"}} 1
         # Add specific server routes
         status_route = app.router.add_get('/status', self._status_handler)
         health_route = app.router.add_get('/health', lambda r: web.json_response({
-            'status': 'healthy', 'timestamp': time.time(), 'platform': 'unlimited'
+            'status': 'healthy',
+            'timestamp': time.time(),
+            'platform': 'unlimited',
+            'ssl_enabled': self.use_ssl,
+            'protocol': self.protocol
         }))
         metrics_route = app.router.add_get('/metrics', self._metrics_handler)
 
@@ -644,23 +815,39 @@ tunnel_server_mode{{mode="unlimited"}} 1
         # Start cleanup task
         self.cleanup_tasks.append(asyncio.create_task(self._cleanup_stale_connections()))
 
-        # Create and start server
+        # Create and start server with SSL support
         runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, self.host, self.port)
+
+        # Use PORT environment variable if available (for cloud platforms)
+        port = int(os.environ.get('PORT', self.port))
+
+        # Create TCP site with SSL context if available
+        site = web.TCPSite(
+            runner,
+            self.host,
+            port,
+            ssl_context=self.ssl_context
+        )
         await site.start()
 
         base_url = f"{self.protocol}://{self.domain}"
-        if self.port not in [80, 443]:
-            base_url += f":{self.port}"
+        if port not in [80, 443]:
+            base_url += f":{port}"
+
+        websocket_url = self.get_public_websocket_url()
 
         logger.info("[START] " + "=" * 80)
-        logger.info("[START] ULTRA HIGH-PERFORMANCE TUNNEL SERVER STARTED!")
+        logger.info("[START] ULTRA HIGH-PERFORMANCE TUNNEL SERVER WITH SSL STARTED!")
         logger.info("[START] MODE: UNLIMITED CAPACITY - NO TIMEOUTS - 100TB+ SUPPORT")
-        logger.info(f"[START] Server: {self.host}:{self.port}")
+        logger.info(f"[START] Server: {self.host}:{port}")
+        logger.info(f"[START] SSL: {'Enabled' if self.use_ssl else 'Disabled'}")
+        logger.info(f"[START] Protocol: {self.protocol}")
         logger.info(f"[START] Domain: {base_url}")
-        logger.info(f"[START] WebSocket: {self.ws_protocol}://{self.domain}:{self.port}/ws")
+        logger.info(f"[START] WebSocket: {websocket_url}")
         logger.info(f"[START] Status: {base_url}/status")
+        if self.ssl_cert:
+            logger.info(f"[START] SSL Certificate: {self.ssl_cert}")
         logger.info("[START] " + "=" * 80)
 
         return runner
@@ -677,19 +864,25 @@ tunnel_server_mode{{mode="unlimited"}} 1
         for tunnel_id in list(self.registry.tunnels.keys()):
             self.registry.unregister_tunnel(tunnel_id)
 
-        logger.info("[STOP] Ultra tunnel server stopped gracefully")
+        logger.info("[STOP] Ultra tunnel server with SSL stopped gracefully")
 
 async def main():
-    """Main server entry point"""
+    """Main server entry point with SSL support"""
     import argparse
 
-    parser = argparse.ArgumentParser(description='Ultra High-Performance Tunnel Server')
+    parser = argparse.ArgumentParser(description='Ultra High-Performance Tunnel Server with SSL')
     parser.add_argument('--host', default=os.environ.get('HOST', '0.0.0.0'),
                        help='Host to bind to')
     parser.add_argument('--port', type=int, default=int(os.environ.get('PORT', 8080)),
                        help='Port to bind to')
     parser.add_argument('--domain', default=os.environ.get('DOMAIN', 'localhost'),
                        help='Public domain name')
+    parser.add_argument('--ssl-cert', default=os.environ.get('SSL_CERT'),
+                       help='Path to SSL certificate file')
+    parser.add_argument('--ssl-key', default=os.environ.get('SSL_KEY'),
+                       help='Path to SSL private key file')
+    parser.add_argument('--no-auto-ssl', action='store_true',
+                       help='Disable automatic SSL detection')
     parser.add_argument('--verbose', '-v', action='store_true',
                        help='Enable verbose logging')
 
@@ -701,7 +894,10 @@ async def main():
     server = UltraHighPerformanceTunnelServer(
         host=args.host,
         port=args.port,
-        domain=args.domain
+        domain=args.domain,
+        ssl_cert=args.ssl_cert,
+        ssl_key=args.ssl_key,
+        auto_detect_ssl=not args.no_auto_ssl
     )
 
     runner = None
