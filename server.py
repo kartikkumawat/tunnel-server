@@ -1,1005 +1,723 @@
 #!/usr/bin/env python3
+
 """
-Universal Tunnel Server with PostgreSQL, Multi-Service Support & Web UI
+Ultra High-Performance Tunnel Server - Unlimited Capacity
+Supports unlimited timeout, unlimited connections, 100TB+ data transfers
+No limits on HTTP/HTTPS/WebSocket/SSE services
 """
+
 import asyncio
 import json
 import logging
+import random
+import string
 import time
 import os
-import re
-from typing import Dict, Optional, Set, Any, List
-from datetime import datetime, timedelta
+import sys
 import uuid
 import base64
+from typing import Dict, Optional, Set, Tuple
+from datetime import datetime, timedelta
+from collections import defaultdict, deque
+from urllib.parse import urlparse
 
-from aiohttp import web, ClientTimeout, WSMsgType
+import aiohttp
+from aiohttp import web, ClientSession, ClientTimeout
 from aiohttp.web_request import Request
 from aiohttp.web_response import Response, StreamResponse
 from aiohttp.web_ws import WebSocketResponse
 import aiohttp_cors
-from sqlalchemy import select, update, delete, func
-from sqlalchemy.exc import IntegrityError
 
-from models import (
-    DatabaseManager, TunnelClient, TunnelService,
-    ActiveConnection, RequestLog, ServerStats
-)
+# Cloud-optimized logging - no file output, no emojis, Windows compatible
+class CloudFormatter(logging.Formatter):
+    """Cloud platform formatter - no emojis, no file I/O"""
+    def format(self, record):
+        try:
+            # Clean any problematic Unicode characters
+            if hasattr(record, 'msg') and record.msg:
+                # Replace emojis with readable text
+                msg_str = str(record.msg)
+                msg_str = msg_str.replace('🚀', '[START]')
+                msg_str = msg_str.replace('✅', '[OK]')
+                msg_str = msg_str.replace('❌', '[ERROR]')
+                msg_str = msg_str.replace('⚠️', '[WARNING]')
+                msg_str = msg_str.replace('🔌', '[CONNECT]')
+                msg_str = msg_str.replace('📝', '[REGISTER]')
+                msg_str = msg_str.replace('🔄', '[FORWARD]')
+                msg_str = msg_str.replace('🧹', '[CLEANUP]')
+                msg_str = msg_str.replace('🛑', '[STOP]')
+                msg_str = msg_str.replace('💓', '[HEARTBEAT]')
+                record.msg = msg_str.encode('ascii', errors='replace').decode('ascii')
+            return super().format(record)
+        except (UnicodeError, UnicodeEncodeError, UnicodeDecodeError):
+            # Ultimate fallback for any Unicode issues
+            record.msg = str(record.msg).encode('ascii', errors='replace').decode('ascii')
+            return super().format(record)
 
-logging.basicConfig(level=logging.INFO)
+# Configure cloud logging - stdout only, no files
+def setup_cloud_logging():
+    """Setup logging optimized for cloud platforms"""
+    # Clear all existing handlers
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+
+    # Create console handler only
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(CloudFormatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    ))
+
+    # Configure root logger
+    logging.root.addHandler(console_handler)
+    logging.root.setLevel(logging.INFO)
+
+    # Suppress verbose logging from dependencies
+    for logger_name in ['aiohttp.access', 'aiohttp.server', 'websockets', 'asyncio']:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+# Initialize cloud logging
+setup_cloud_logging()
 logger = logging.getLogger(__name__)
 
-class UniversalTunnelServer:
+class PerformanceMetrics:
+    """Ultra high-performance metrics collection - memory only"""
+    def __init__(self):
+        self.start_time = time.time()
+        self.request_count = 0
+        self.bytes_transferred = 0
+        self.error_count = 0
+        self.active_connections = 0
+        self.response_times = deque(maxlen=10000)  # Increased buffer
+        self.throughput_samples = deque(maxlen=1000)  # Increased buffer
+
+    def record_request(self, duration: float, bytes_size: int, success: bool):
+        """Record request metrics with minimal overhead"""
+        self.request_count += 1
+        self.bytes_transferred += bytes_size
+        self.response_times.append(duration)
+        if not success:
+            self.error_count += 1
+
+    def get_throughput(self) -> float:
+        """Calculate current throughput in MB/s"""
+        if len(self.throughput_samples) < 2:
+            return 0.0
+        time_diff = self.throughput_samples[-1][0] - self.throughput_samples[0][0]
+        bytes_diff = sum(sample[1] for sample in self.throughput_samples)
+        return (bytes_diff / (1024 * 1024)) / max(time_diff, 0.001)
+
+class TunnelRegistry:
+    """Ultra high-performance tunnel registry with unlimited capacity"""
+    def __init__(self):
+        self.tunnels: Dict[str, dict] = {}  # tunnel_id -> tunnel_data
+        self.subdomain_to_tunnel: Dict[str, str] = {}  # subdomain -> tunnel_id
+        self.client_to_tunnel: Dict[str, str] = {}  # client_id -> tunnel_id
+        self.company_subdomains: Dict[str, Set[str]] = defaultdict(set)
+        self.used_subdomains: Set[str] = set()
+
+    def register_tunnel(self, tunnel_id: str, client_id: str, company: str,
+                       subdomain: str, websocket: WebSocketResponse,
+                       local_port: int, client_ip: str) -> dict:
+        """Register new tunnel with O(1) performance - unlimited capacity"""
+        tunnel_data = {
+            'tunnel_id': tunnel_id,
+            'client_id': client_id,
+            'company': company,
+            'subdomain': subdomain,
+            'websocket': websocket,
+            'local_port': local_port,
+            'client_ip': client_ip,
+            'created_at': time.time(),
+            'last_seen': time.time(),
+            'request_count': 0,
+            'bytes_transferred': 0,
+            'active_requests': 0
+        }
+
+        self.tunnels[tunnel_id] = tunnel_data
+        self.subdomain_to_tunnel[subdomain] = tunnel_id
+        self.client_to_tunnel[client_id] = tunnel_id
+        self.company_subdomains[company].add(subdomain)
+        self.used_subdomains.add(subdomain)
+
+        return tunnel_data
+
+    def get_tunnel_by_subdomain(self, subdomain: str) -> Optional[dict]:
+        """O(1) tunnel lookup by subdomain"""
+        tunnel_id = self.subdomain_to_tunnel.get(subdomain)
+        return self.tunnels.get(tunnel_id) if tunnel_id else None
+
+    def get_tunnel_by_client(self, client_id: str) -> Optional[dict]:
+        """O(1) tunnel lookup by client ID"""
+        tunnel_id = self.client_to_tunnel.get(client_id)
+        return self.tunnels.get(tunnel_id) if tunnel_id else None
+
+    def unregister_tunnel(self, tunnel_id: str):
+        """Remove tunnel with cleanup"""
+        if tunnel_id not in self.tunnels:
+            return
+
+        tunnel_data = self.tunnels.pop(tunnel_id)
+        subdomain = tunnel_data['subdomain']
+        client_id = tunnel_data['client_id']
+        company = tunnel_data['company']
+
+        self.subdomain_to_tunnel.pop(subdomain, None)
+        self.client_to_tunnel.pop(client_id, None)
+        self.company_subdomains[company].discard(subdomain)
+        self.used_subdomains.discard(subdomain)
+
+    def generate_company_subdomain(self, company: str, client_id: str) -> str:
+        """Generate company-namespaced subdomain with collision handling"""
+        # Try the preferred name first
+        preferred = f"{company}"
+        if preferred not in self.used_subdomains:
+            return preferred
+
+        # Generate with random suffix
+        for _ in range(100):  # Increased attempts
+            suffix = ''.join(random.choices(string.digits, k=6))  # Longer suffix
+            candidate = f"{company}{suffix}"
+            if candidate not in self.used_subdomains:
+                return candidate
+
+        # Fallback with timestamp and UUID
+        return f"{company}{int(time.time())}{str(uuid.uuid4())[:8]}"
+
+class UltraHighPerformanceTunnelServer:
+    """Main tunnel server optimized for unlimited capacity and performance"""
+
     def __init__(self, host='0.0.0.0', port=8080, domain='localhost'):
         self.host = host
         self.port = port
         self.domain = self._normalize_domain(domain)
 
-        # Database
-        self.db = DatabaseManager()
+        # UNLIMITED SETTINGS - No limits on anything
+        self.max_tunnels = None  # Unlimited tunnels
+        self.request_timeout = None  # No timeout
+        self.max_body_size = None  # Unlimited body size (100TB+)
 
-        # In-memory connection tracking
-        self.websocket_connections: Dict[str, WebSocketResponse] = {}
-        self.sse_connections: Dict[str, StreamResponse] = {}
+        # Ultra high-performance components - memory only
+        self.registry = TunnelRegistry()
+        self.metrics = PerformanceMetrics()
         self.pending_requests: Dict[str, asyncio.Future] = {}
-        self.active_sessions: Dict[str, dict] = {}
 
-        # Universal service configurations per subdomain
-        self.service_configs: Dict[str, dict] = {}
-
-        # SSL detection
+        # Cloud platform detection and SSL
         self.use_ssl = self._detect_ssl()
         self.protocol = 'https' if self.use_ssl else 'http'
+        self.ws_protocol = 'wss' if self.use_ssl else 'ws'
 
-        logger.info(f"🚀 Universal Tunnel Server - Domain: {self.domain}")
+        # NO RATE LIMITING - Unlimited requests
+        self.rate_limiters: Dict[str, dict] = {}
+        self.rate_limit_requests = float('inf')  # Unlimited
+        self.rate_limit_window = 1  # Minimal window
 
-    async def status_handler(self, request: Request) -> Response:
-        """Enhanced status endpoint with framework detection"""
-        uptime = time.time() - self.start_time
-        tunnels_info = []
+        self.running = False
+        self.cleanup_tasks = []
 
-        for tid, tdata in self.tunnels.items():
-            ports_info = []
-            for port, subdomain in tdata.get('exposed_ports', {}).items():
-                service_types = tdata.get('service_types', {}).get(port, ['http'])
-                ports_info.append({
-                    'local_port': port,
-                    'subdomain': subdomain,
-                    'public_url': self.get_public_url(subdomain),
-                    'service_types': service_types,
-                    'websocket_url': self.get_public_url(subdomain).replace('http://', 'ws://').replace('https://', 'wss://') if 'ws' in service_types else None,
-                    'sse_url': self.get_public_url(subdomain) if 'sse' in service_types else None
-                })
-
-            tunnels_info.append({
-                'tunnel_id': tid,
-                'client_ip': tdata['client_ip'],
-                'uptime': time.time() - tdata['created_at'],
-                'last_seen': tdata['last_seen'],
-                'exposed_ports': ports_info,
-                'request_count': tdata.get('request_count', 0),
-                'websocket_count': tdata.get('websocket_count', 0),
-                'sse_count': tdata.get('sse_count', 0),
-                'bytes_transferred': tdata.get('bytes_transferred', 0),
-                'detected_frameworks': list(tdata.get('detected_frameworks', set()))
-            })
-
-        status = {
-            'server_status': 'running',
-            'version': '3.0',
-            'uptime_seconds': uptime,
-            'active_tunnels': len(self.tunnels),
-            'max_tunnels': self.max_tunnels,
-            'total_requests': self.total_requests,
-            'total_websockets': self.total_websockets,
-            'total_sse': self.total_sse,
-            'total_bytes_transferred': self.total_bytes_transferred,
-            'failed_requests': self.failed_requests,
-            'pending_requests': len(self.pending_requests),
-            'active_websocket_sessions': len(self.websocket_sessions),
-            'active_sse_connections': len(self.sse_connections),
-            'tunnels': tunnels_info,
-            'features': [
-                'universal-websocket', 'server-sent-events', 'all-http-methods',
-                'framework-detection', 'auto-protocol-upgrade', 'binary-support',
-                'react-support', 'vue-support', 'flask-support', 'fastapi-support',
-                'go-support', 'node-support', 'php-support', 'aspnet-support'
-            ]
-        }
-
-        return web.json_response(status)
-
-    async def health_handler(self, request: Request) -> Response:
-        """Health check endpoint"""
-        return web.json_response({
-            'status': 'healthy',
-            'timestamp': time.time(),
-            'active_tunnels': len(self.tunnels),
-            'version': '3.0'
-        })
-
-    async def metrics_handler(self, request: Request) -> Response:
-        """Enhanced Prometheus metrics"""
-        metrics = [
-            f"# HELP tunnel_server_uptime_seconds Server uptime in seconds",
-            f"tunnel_server_uptime_seconds {time.time() - self.start_time}",
-            f"# HELP tunnel_server_active_tunnels Number of active tunnels",
-            f"tunnel_server_active_tunnels {len(self.tunnels)}",
-            f"# HELP tunnel_server_total_requests Total HTTP requests processed",
-            f"tunnel_server_total_requests {self.total_requests}",
-            f"# HELP tunnel_server_total_websockets Total WebSocket connections",
-            f"tunnel_server_total_websockets {self.total_websockets}",
-            f"# HELP tunnel_server_total_sse Total SSE connections",
-            f"tunnel_server_total_sse {self.total_sse}",
-            f"# HELP tunnel_server_failed_requests Total failed requests",
-            f"tunnel_server_failed_requests {self.failed_requests}",
-            f"# HELP tunnel_server_bytes_transferred Total bytes transferred",
-            f"tunnel_server_bytes_transferred {self.total_bytes_transferred}",
-            f"# HELP tunnel_server_pending_requests Current pending requests",
-            f"tunnel_server_pending_requests {len(self.pending_requests)}",
-            f"# HELP tunnel_server_websocket_sessions Current WebSocket sessions",
-            f"tunnel_server_websocket_sessions {len(self.websocket_sessions)}",
-            f"# HELP tunnel_server_sse_connections Current SSE connections",
-            f"tunnel_server_sse_connections {len(self.sse_connections)}",
-        ]
-
-        return web.Response(text='\n'.join(metrics), content_type='text/plain')
-
-    async def favicon_handler(self, request: Request) -> Response:
-        """Handle favicon requests"""
-        return web.Response(status=204)
-
-    async def robots_handler(self, request: Request) -> Response:
-        """Handle robots.txt requests"""
-        return web.Response(text="User-agent: *\nDisallow: /", content_type='text/plain')
-
-    async def not_found_handler(self, request: Request) -> Response:
-        """Custom 404 handler"""
-        message = f"🚀 Universal Tunnel Server v3.0 is running!\n\n"
-        message += f"No resource found at: {request.path}\n\n"
-        message += f"📊 Server Status: {self.get_public_url('status')}\n"
-        message += f"🔧 Health Check: {self.get_public_url('health')}\n"
-        message += f"📈 Metrics: {self.get_public_url('metrics')}\n\n"
-        message += f"Supports: WebSocket, SSE, HTTP for ANY framework!"
-
-        return web.Response(text=message, status=404, content_type='text/plain')
-
-    def _detect_ssl(self) -> bool:
-        """Smart SSL detection"""
-        platforms = ['RENDER', 'HEROKU', 'VERCEL', 'NETLIFY', 'RAILWAY']
-        return (
-            any(os.getenv(p) for p in platforms) or
-            self.port == 443 or
-            os.getenv('SSL_ENABLED', '').lower() == 'true'
-        )
+        logger.info("[INIT] Ultra High-Performance Tunnel Server initialized")
+        logger.info("[INIT] UNLIMITED MODE: No timeouts, no connection limits, 100TB+ support")
+        logger.info(f"[INIT] SSL: {'Enabled' if self.use_ssl else 'Disabled'}")
 
     def _normalize_domain(self, domain: str) -> str:
-        return domain.replace('http://', '').replace('https://', '').split(':')[0]
+        """Normalize domain by removing protocol"""
+        if domain.startswith(('http://', 'https://')):
+            return urlparse(domain).netloc
+        return domain
+
+    def _detect_ssl(self) -> bool:
+        """Detect SSL configuration for cloud platforms"""
+        # Cloud platforms typically provide SSL
+        cloud_indicators = ['RENDER', 'HEROKU', 'RAILWAY', 'VERCEL', 'NETLIFY', 'FLYIO']
+        if any(os.environ.get(indicator) for indicator in cloud_indicators):
+            return True
+
+        return (
+            self.port == 443 or
+            os.environ.get('USE_SSL', '').lower() == 'true' or
+            os.environ.get('HTTPS', '').lower() == 'true'
+        )
+
+    def get_public_url(self, subdomain: str) -> str:
+        """Generate public URL for subdomain"""
+        port_str = f":{self.port}" if self.port not in [80, 443] else ""
+        return f"{self.protocol}://{subdomain}.{self.domain}{port_str}"
+
+    def _extract_subdomain(self, host: str) -> Optional[str]:
+        """Extract subdomain from Host header with high performance"""
+        if not host:
+            return None
+
+        host_clean = host.split(':')[0].lower()
+        domain_suffix = f".{self.domain}"
+
+        if not host_clean.endswith(domain_suffix):
+            return None
+
+        subdomain = host_clean[:-len(domain_suffix)]
+        return subdomain if subdomain else None
+
+    def check_rate_limit(self, tunnel_id: str) -> bool:
+        """NO RATE LIMITING - Always allow"""
+        return True  # Unlimited requests always allowed
 
     async def websocket_handler(self, request: Request) -> WebSocketResponse:
-        """Enhanced WebSocket control handler"""
-        ws = WebSocketResponse(heartbeat=30, max_msg_size=100*1024*1024)
-        await ws.prepare(request)
+        """Ultra WebSocket handler - unlimited capacity"""
+        # UNLIMITED WebSocket settings
+        ws = WebSocketResponse(
+            heartbeat=None,  # No heartbeat timeout
+            max_msg_size=None,  # Unlimited message size (100TB+)
+            compress=False,  # Disabled to prevent encoding issues
+            timeout=None  # No timeout
+        )
 
-        client_id = None
+        await ws.prepare(request)
+        tunnel_id = None
         client_ip = request.remote or "unknown"
 
         try:
+            self.metrics.active_connections += 1
+            logger.info(f"[WS] New unlimited WebSocket connection from {client_ip}")
+
             async for msg in ws:
-                if msg.type == WSMsgType.TEXT:
-                    data = json.loads(msg.data)
-                    if data.get('type') == 'register':
-                        client_id = await self._handle_registration(data, ws, client_ip)
-                    elif client_id and data.get('type') == 'service_config':
-                        await self._handle_service_config(data, client_id)
-                    elif client_id:
-                        await self._handle_control_message(data, client_id)
+                if msg.type == web.WSMsgType.TEXT:
+                    try:
+                        data = json.loads(msg.data)
+                        msg_type = data.get('type')
 
-        except Exception as e:
-            logger.error(f"WebSocket error: {e}")
-        finally:
-            if client_id:
-                await self._cleanup_client(client_id)
+                        if msg_type == 'register':
+                            tunnel_id = await self._handle_registration(data, ws, client_ip)
+                        elif msg_type == 'response' and tunnel_id:
+                            await self._handle_response(data)
+                        elif msg_type == 'heartbeat' and tunnel_id:
+                            await self._handle_heartbeat(tunnel_id, ws)
+                        else:
+                            logger.debug(f"[WS] Message type: {msg_type}")
 
-        return ws
+                    except json.JSONDecodeError:
+                        logger.error(f"[WS] Invalid JSON from {client_ip}")
+                    except Exception as e:
+                        logger.error(f"[WS] Message processing error: {e}")
 
-    async def _handle_registration(self, data: dict, ws: WebSocketResponse, client_ip: str) -> str:
-        """Handle client registration with multi-service support"""
-        async with self.db.get_session() as session:
-            # Create or update client
-            client_id = data.get('client_id') or str(uuid.uuid4())
-
-            # Check existing client
-            result = await session.execute(
-                select(TunnelClient).where(TunnelClient.id == client_id)
-            )
-            client = result.scalar_one_or_none()
-
-            if not client:
-                client = TunnelClient(
-                    id=client_id,
-                    client_ip=client_ip,
-                    user_agent=data.get('user_agent', ''),
-                    client_info=data.get('client_info', {})
-                )
-                session.add(client)
-            else:
-                client.last_seen = datetime.utcnow()
-                client.is_active = True
-
-            await session.commit()
-
-            # Store WebSocket connection
-            self.websocket_connections[client_id] = ws
-
-            # Send registration response
-            await ws.send_str(json.dumps({
-                'type': 'registered',
-                'client_id': client_id,
-                'server_version': '4.0',
-                'features': ['multi-service', 'universal-proxy', 'smart-routing']
-            }))
-
-            logger.info(f"✅ Client registered: {client_id[:8]} from {client_ip}")
-            return client_id
-
-    async def _handle_service_config(self, data: dict, client_id: str):
-        """Handle service configuration for multi-service support"""
-        async with self.db.get_session() as session:
-            local_port = data.get('local_port')
-            service_types = data.get('service_types', ['http'])
-            service_configs = data.get('service_configs', {})
-            preferred_subdomain = data.get('preferred_subdomain')
-
-            # Generate unique subdomain
-            subdomain = await self._generate_subdomain(session, local_port, preferred_subdomain)
-
-            # Create or update service
-            service = TunnelService(
-                client_id=client_id,
-                subdomain=subdomain,
-                local_port=local_port,
-                local_host=data.get('local_host', 'localhost'),
-                service_types=service_types,
-                service_configs=service_configs,
-                detected_framework=data.get('detected_framework', 'unknown')
-            )
-
-            try:
-                session.add(service)
-                await session.commit()
-
-                # Store service config in memory for quick access
-                self.service_configs[subdomain] = {
-                    'client_id': client_id,
-                    'service_id': service.id,
-                    'local_port': local_port,
-                    'local_host': service.local_host,
-                    'service_types': service_types,
-                    'service_configs': service_configs
-                }
-
-                # Build URLs
-                urls = self._build_service_urls(subdomain, service_types, service_configs)
-
-                # Send response
-                ws = self.websocket_connections.get(client_id)
-                if ws:
-                    await ws.send_str(json.dumps({
-                        'type': 'service_configured',
-                        'service_id': service.id,
-                        'subdomain': subdomain,
-                        'urls': urls
-                    }))
-
-                logger.info(f"🔧 Service configured: {subdomain} -> {local_port}")
-
-            except IntegrityError:
-                await session.rollback()
-                logger.error(f"❌ Subdomain {subdomain} already exists")
-
-    def _build_service_urls(self, subdomain: str, service_types: List[str], configs: dict) -> dict:
-        """Build URLs for different service types with custom paths"""
-        base_url = f"{self.protocol}://{subdomain}.{self.domain}"
-        if self.port not in [80, 443]:
-            base_url += f":{self.port}"
-
-        urls = {}
-
-        for service_type in service_types:
-            if service_type == 'http':
-                urls['http'] = base_url
-                # Add custom HTTP paths if configured
-                if 'http_paths' in configs:
-                    urls['http_paths'] = {
-                        path: f"{base_url}{path}"
-                        for path in configs['http_paths']
-                    }
-
-            elif service_type == 'ws':
-                ws_path = configs.get('websocket_path', '/ws')
-                urls['websocket'] = f"{base_url.replace('http', 'ws')}{ws_path}"
-
-            elif service_type == 'sse':
-                sse_path = configs.get('sse_path', '/events')
-                urls['sse'] = f"{base_url}{sse_path}"
-
-        return urls
-
-    async def _generate_subdomain(self, session, local_port: int, preferred: str = None) -> str:
-        """Generate unique subdomain"""
-        if preferred:
-            result = await session.execute(
-                select(TunnelService).where(TunnelService.subdomain == preferred)
-            )
-            if not result.scalar_one_or_none():
-                return preferred
-
-        # Generate based on port and random suffix
-        import random, string
-        suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
-        return f"port{local_port}-{suffix}"
-
-    async def handle_request(self, request: Request) -> Response:
-        """Universal request handler with smart routing"""
-        start_time = time.time()
-
-        # Extract subdomain and determine service type
-        host = request.headers.get('host', '').split(':')[0]
-        subdomain = self._extract_subdomain(host)
-
-        if not subdomain or subdomain not in self.service_configs:
-            return await self._handle_server_request(request)
-
-        service_config = self.service_configs[subdomain]
-
-        # Determine connection type and route accordingly
-        if self._is_websocket_request(request):
-            return await self._handle_websocket_proxy(request, service_config)
-        elif self._is_sse_request(request):
-            return await self._handle_sse_proxy(request, service_config)
-        else:
-            return await self._handle_http_proxy(request, service_config, start_time)
-
-    def _is_websocket_request(self, request: Request) -> bool:
-        """Universal WebSocket detection"""[3]
-        connection = request.headers.get('connection', '').lower()
-        upgrade = request.headers.get('upgrade', '').lower()
-        return (
-            'upgrade' in connection and upgrade == 'websocket' or
-            'socket.io' in request.path.lower() or
-            any(ws_path in request.path.lower() for ws_path in ['/ws', '/websocket', '/socket'])
-        )
-
-    def _is_sse_request(self, request: Request) -> bool:
-        """Universal SSE detection"""[5]
-        accept = request.headers.get('accept', '').lower()
-        return (
-            'text/event-stream' in accept or
-            any(sse_path in request.path.lower() for sse_path in ['/events', '/stream', '/sse'])
-        )
-
-    async def _handle_websocket_proxy(self, request: Request, service_config: dict):
-        """Universal WebSocket proxy with framework agnostic handling"""[7]
-        ws = WebSocketResponse(heartbeat=30, max_msg_size=100*1024*1024)
-        await ws.prepare(request)
-
-        session_id = str(uuid.uuid4())
-        client_id = service_config['client_id']
-
-        # Store connection
-        self.active_sessions[session_id] = {
-            'type': 'websocket',
-            'client_id': client_id,
-            'service_config': service_config,
-            'ws': ws
-        }
-
-        # Get custom WebSocket configuration
-        ws_config = service_config.get('service_configs', {})
-        local_port = service_config['local_port']
-        local_host = service_config['local_host']
-
-        # Build local WebSocket URL with custom path
-        ws_path = ws_config.get('websocket_path', request.path)
-        local_ws_url = f"ws://{local_host}:{local_port}{ws_path}"
-
-        # Notify client to establish connection
-        control_ws = self.websocket_connections.get(client_id)
-        if control_ws:
-            await control_ws.send_str(json.dumps({
-                'type': 'websocket_initiate',
-                'session_id': session_id,
-                'local_url': local_ws_url,
-                'headers': dict(request.headers),
-                'query_params': dict(request.query)
-            }))
-
-        # Relay messages
-        try:
-            async for msg in ws:
-                if msg.type == WSMsgType.TEXT:
-                    await control_ws.send_str(json.dumps({
-                        'type': 'websocket_data',
-                        'session_id': session_id,
-                        'message_type': 'text',
-                        'data': msg.data
-                    }))
-                elif msg.type == WSMsgType.BINARY:
-                    await control_ws.send_str(json.dumps({
-                        'type': 'websocket_data',
-                        'session_id': session_id,
-                        'message_type': 'binary',
-                        'data': base64.b64encode(msg.data).decode()
-                    }))
-        except Exception as e:
-            logger.error(f"WebSocket proxy error: {e}")
-        finally:
-            self.active_sessions.pop(session_id, None)
-
-        return ws
-
-    async def _handle_sse_proxy(self, request: Request, service_config: dict):
-        """Universal SSE proxy with custom paths"""[9]
-        response = StreamResponse(
-            status=200,
-            headers={
-                'Content-Type': 'text/event-stream',
-                'Cache-Control': 'no-cache',
-                'Connection': 'keep-alive',
-                'Access-Control-Allow-Origin': '*'
-            }
-        )
-        await response.prepare(request)
-
-        session_id = str(uuid.uuid4())
-        client_id = service_config['client_id']
-
-        # Store connection
-        self.active_sessions[session_id] = {
-            'type': 'sse',
-            'client_id': client_id,
-            'service_config': service_config,
-            'response': response
-        }
-
-        # Get custom SSE configuration
-        sse_config = service_config.get('service_configs', {})
-        local_port = service_config['local_port']
-        local_host = service_config['local_host']
-
-        # Build local SSE URL with custom path
-        sse_path = sse_config.get('sse_path', request.path)
-        local_sse_url = f"http://{local_host}:{local_port}{sse_path}"
-
-        # Notify client
-        control_ws = self.websocket_connections.get(client_id)
-        if control_ws:
-            await control_ws.send_str(json.dumps({
-                'type': 'sse_initiate',
-                'session_id': session_id,
-                'local_url': local_sse_url,
-                'headers': dict(request.headers)
-            }))
-
-        # Keep connection alive
-        try:
-            while not response.task.done():
-                await asyncio.sleep(30)
-                await response.write(b': keepalive\n\n')
-        except Exception as e:
-            logger.error(f"SSE proxy error: {e}")
-        finally:
-            self.active_sessions.pop(session_id, None)
-
-        return response
-
-    async def _handle_http_proxy(self, request: Request, service_config: dict, start_time: float):
-        """Enhanced HTTP proxy with routing support"""[12]
-        request_id = str(uuid.uuid4())
-        body = await request.read()
-        client_id = service_config['client_id']
-
-        # Get custom HTTP configuration
-        http_config = service_config.get('service_configs', {})
-        local_port = service_config['local_port']
-        local_host = service_config['local_host']
-
-        # Handle path routing
-        local_path = request.path
-        if 'path_mappings' in http_config:
-            for mapping in http_config['path_mappings']:
-                if request.path.startswith(mapping['public_path']):
-                    local_path = request.path.replace(
-                        mapping['public_path'],
-                        mapping['local_path'], 1
-                    )
+                elif msg.type == web.WSMsgType.ERROR:
+                    logger.error(f"[WS] WebSocket error: {ws.exception()}")
                     break
 
-        # Build local URL
-        local_url = f"http://{local_host}:{local_port}{local_path}"
-        if request.query_string:
-            local_url += f"?{request.query_string}"
+        except Exception as e:
+            logger.error(f"[WS] WebSocket handler error: {e}")
 
-        # Create future for response
-        future = asyncio.Future()
-        self.pending_requests[request_id] = future
+        finally:
+            self.metrics.active_connections -= 1
+            if tunnel_id:
+                self.registry.unregister_tunnel(tunnel_id)
+                logger.info(f"[WS] Tunnel {tunnel_id} disconnected")
 
-        # Send request to client
-        control_ws = self.websocket_connections.get(client_id)
-        if control_ws:
-            await control_ws.send_str(json.dumps({
-                'type': 'http_request',
-                'request_id': request_id,
-                'method': request.method,
-                'local_url': local_url,
-                'headers': dict(request.headers),
-                'body': base64.b64encode(body).decode() if body else ''
-            }))
+        return ws
+
+    async def _handle_registration(self, data: dict, ws: WebSocketResponse,
+                                  client_ip: str) -> Optional[str]:
+        """Handle tunnel registration - unlimited capacity"""
+        local_port = data.get('local_port')
+        company = data.get('company', 'default')
+        client_id = data.get('client_id')
+
+        # Validate input
+        if not isinstance(local_port, int) or not (1 <= local_port <= 65535):
+            await ws.send_json({'type': 'error', 'message': 'Invalid local_port'})
+            return None
+
+        # NO CAPACITY LIMITS - Accept unlimited tunnels
+
+        # Generate or reuse client ID
+        if not client_id:
+            client_id = str(uuid.uuid4())
+
+        # Check if client already has a tunnel
+        existing_tunnel = self.registry.get_tunnel_by_client(client_id)
+        if existing_tunnel:
+            subdomain = existing_tunnel['subdomain']
+        else:
+            subdomain = self.registry.generate_company_subdomain(company, client_id)
+
+        tunnel_id = str(uuid.uuid4())
+
+        # Register the tunnel
+        tunnel_data = self.registry.register_tunnel(
+            tunnel_id, client_id, company, subdomain, ws, local_port, client_ip
+        )
+
+        public_url = self.get_public_url(subdomain)
+
+        # Include client_id in response
+        await ws.send_json({
+            'type': 'registered',
+            'tunnel_id': tunnel_id,
+            'client_id': client_id,
+            'public_url': public_url,
+            'subdomain': subdomain,
+            'company': company,
+            'server_info': {'version': '3.0', 'platform': 'unlimited'}
+        })
+
+        logger.info(f"[REGISTER] Unlimited tunnel registered: {public_url} -> localhost:{local_port}")
+        return tunnel_id
+
+    async def _handle_response(self, data: dict):
+        """Handle response from client with minimal latency"""
+        request_id = data.get('request_id')
+        if request_id in self.pending_requests:
+            future = self.pending_requests.pop(request_id)
+            if not future.done():
+                future.set_result(data)
+
+    async def _handle_heartbeat(self, tunnel_id: str, ws: WebSocketResponse):
+        """Handle heartbeat with performance tracking"""
+        if tunnel_id in self.registry.tunnels:
+            self.registry.tunnels[tunnel_id]['last_seen'] = time.time()
+        await ws.send_json({'type': 'heartbeat_ack'})
+
+    async def http_handler(self, request: Request) -> Response:
+        """Ultra high-performance HTTP handler - unlimited capacity"""
+        start_time = time.time()
+        host = request.headers.get('host', '')
+
+        # Extract subdomain with performance optimization
+        subdomain = self._extract_subdomain(host)
+        if not subdomain:
+            return await self._handle_server_route(request)
+
+        # Get tunnel with O(1) lookup
+        tunnel = self.registry.get_tunnel_by_subdomain(subdomain)
+        if not tunnel:
+            return web.Response(
+                text=f"Tunnel '{subdomain}' not found",
+                status=404,
+                headers={'Content-Type': 'text/plain'}
+            )
+
+        # Check if WebSocket is still alive
+        if tunnel['websocket'].closed:
+            self.registry.unregister_tunnel(tunnel['tunnel_id'])
+            return web.Response(
+                text="Tunnel connection closed",
+                status=503,
+                headers={'Content-Type': 'text/plain'}
+            )
+
+        # NO RATE LIMITING - Accept all requests
 
         try:
-            # Wait for response
-            response_data = await asyncio.wait_for(future, timeout=30.0)
+            # Forward request with unlimited streaming support
+            response = await self._forward_request(request, tunnel)
 
-            # Log request
-            duration = (time.time() - start_time) * 1000
-            asyncio.create_task(self._log_request(
-                service_config['service_id'], request, response_data, duration
-            ))
+            # Update metrics
+            duration = time.time() - start_time
+            body_size = len(response.body) if hasattr(response, 'body') and response.body else 0
+            self.metrics.record_request(duration, body_size, True)
+            tunnel['request_count'] += 1
+            tunnel['bytes_transferred'] += body_size
 
-            # Build response
-            return web.Response(
-                body=base64.b64decode(response_data.get('body', '')),
-                status=response_data.get('status', 200),
-                headers=response_data.get('headers', {})
-            )
+            logger.debug(f"[HTTP] {request.method} {request.path_qs} -> {subdomain} ({response.status}) [{duration:.3f}s]")
+            return response
 
-        except asyncio.TimeoutError:
-            return web.Response(text="Request timeout", status=504)
-        finally:
-            self.pending_requests.pop(request_id, None)
+        except Exception as e:
+            self.metrics.record_request(time.time() - start_time, 0, False)
+            logger.error(f"[HTTP] Forwarding error: {e}")
+            return web.Response(text="Internal Server Error", status=500)
 
-    async def _log_request(self, service_id: str, request: Request, response_data: dict, duration: float):
-        """Log request for analytics"""
-        async with self.db.get_session() as session:
-            log_entry = RequestLog(
-                service_id=service_id,
-                method=request.method,
-                path=request.path,
-                status_code=response_data.get('status', 200),
-                response_time=duration,
-                bytes_received=len(await request.read()) if hasattr(request, 'read') else 0,
-                bytes_sent=len(response_data.get('body', '')),
-                remote_ip=request.remote,
-                user_agent=request.headers.get('user-agent', '')
-            )
-            session.add(log_entry)
-            await session.commit()
-
-    def _extract_subdomain(self, host: str) -> Optional[str]:
-        """Extract subdomain from host"""
-        if not host.endswith(self.domain):
-            return None
-        subdomain_part = host[:-len(self.domain)-1]
-        return subdomain_part if subdomain_part else None
-
-    async def _handle_server_request(self, request: Request) -> Response:
-        """Handle server management requests"""
+    async def _handle_server_route(self, request: Request) -> Response:
+        """Handle server management routes"""
         path = request.path.strip('/')
 
         if path == 'status':
             return await self._status_handler(request)
-        elif path == 'ui' or path == '':
-            return await self._ui_handler(request)
-        elif path.startswith('api/'):
-            return await self._api_handler(request)
+        elif path == 'health':
+            return web.json_response({
+                'status': 'healthy',
+                'timestamp': time.time(),
+                'platform': 'unlimited'
+            })
+        elif path == 'metrics':
+            return await self._metrics_handler(request)
         else:
-            return web.Response(text="Universal Tunnel Server v4.0", status=404)
+            return web.Response(
+                text=f"Ultra Tunnel Server - UNLIMITED MODE\nVisit /status for active tunnels",
+                status=404,
+                headers={'Content-Type': 'text/plain'}
+            )
+
+    async def _forward_request(self, request: Request, tunnel: dict) -> Response:
+        """Forward HTTP request - unlimited capacity (100TB+)"""
+        request_id = str(uuid.uuid4())
+
+        # Read body with UNLIMITED size
+        try:
+            body = await request.read()
+            # NO SIZE LIMIT - Accept 100TB+ bodies
+
+        except Exception as e:
+            logger.error(f"[FORWARD] Error reading body: {e}")
+            body = b''
+
+        # Prepare request data
+        request_data = {
+            'type': 'request',
+            'request_id': request_id,
+            'method': request.method,
+            'path': request.path_qs,
+            'headers': dict(request.headers),
+            'body': base64.b64encode(body).decode('utf-8') if body else None
+        }
+
+        # Create future for response
+        future = asyncio.Future()
+        self.pending_requests[request_id] = future
+        tunnel['active_requests'] += 1
+
+        try:
+            # Send request to client
+            await tunnel['websocket'].send_json(request_data)
+
+            # Wait for response with NO TIMEOUT (unlimited wait)
+            response_data = await future
+
+            # Create response with proper encoding
+            status = response_data.get('status', 200)
+            headers = response_data.get('headers', {})
+            body_b64 = response_data.get('body', '')
+
+            # Decode body safely
+            try:
+                response_body = base64.b64decode(body_b64) if body_b64 else b''
+            except Exception as e:
+                logger.error(f"[FORWARD] Base64 decode error: {e}")
+                response_body = b''
+
+            # Clean problematic headers
+            clean_headers = {}
+            skip_headers = {
+                'content-length', 'transfer-encoding', 'content-encoding',
+                'connection', 'upgrade', 'keep-alive'
+            }
+
+            for key, value in headers.items():
+                if key.lower() not in skip_headers:
+                    try:
+                        clean_headers[key] = str(value)
+                    except:
+                        continue
+
+            # Set proper Content-Length
+            if response_body:
+                clean_headers['Content-Length'] = str(len(response_body))
+
+            return web.Response(
+                body=response_body,
+                status=status,
+                headers=clean_headers
+            )
+
+        finally:
+            tunnel['active_requests'] -= 1
+            self.pending_requests.pop(request_id, None)
 
     async def _status_handler(self, request: Request) -> Response:
-        """Enhanced status with database stats"""
-        async with self.db.get_session() as session:
-            # Get active clients count
-            clients_result = await session.execute(
-                select(func.count(TunnelClient.id)).where(TunnelClient.is_active == True)
-            )
-            active_clients = clients_result.scalar()
+        """Status endpoint with comprehensive metrics"""
+        uptime = time.time() - self.metrics.start_time
 
-            # Get active services count
-            services_result = await session.execute(
-                select(func.count(TunnelService.id)).where(TunnelService.is_active == True)
-            )
-            active_services = services_result.scalar()
+        tunnels_info = []
+        for tunnel in self.registry.tunnels.values():
+            tunnels_info.append({
+                'company': tunnel['company'],
+                'subdomain': tunnel['subdomain'],
+                'public_url': self.get_public_url(tunnel['subdomain']),
+                'local_port': tunnel['local_port'],
+                'client_ip': tunnel['client_ip'],
+                'uptime': time.time() - tunnel['created_at'],
+                'requests': tunnel['request_count'],
+                'bytes_transferred': tunnel['bytes_transferred'],
+                'active_requests': tunnel['active_requests']
+            })
 
-            # Get request stats
-            requests_result = await session.execute(
-                select(func.count(RequestLog.id))
-            )
-            total_requests = requests_result.scalar()
-
-            status = {
-                'server_status': 'running',
-                'version': '4.0',
-                'active_clients': active_clients,
-                'active_services': active_services,
-                'total_requests': total_requests,
-                'active_websockets': len([s for s in self.active_sessions.values() if s['type'] == 'websocket']),
-                'active_sse': len([s for s in self.active_sessions.values() if s['type'] == 'sse']),
-                'features': ['postgresql', 'multi-service', 'universal-proxy', 'web-ui']
-            }
-
-            return web.json_response(status)
-
-    async def _ui_handler(self, request: Request) -> Response:
-        """Serve web UI"""
-        ui_html = await self._generate_ui_html()
-        return web.Response(text=ui_html, content_type='text/html')
-
-    async def _generate_ui_html(self) -> str:
-        """Generate management UI HTML"""
-        return """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Universal Tunnel Server v4.0</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-</head>
-<body class="bg-gray-100">
-    <div class="container mx-auto px-4 py-8">
-        <h1 class="text-4xl font-bold text-center mb-8 text-blue-600">
-            🚀 Universal Tunnel Server v4.0
-        </h1>
-
-        <!-- Stats Cards -->
-        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-            <div class="bg-white rounded-lg shadow p-6">
-                <h3 class="text-lg font-semibold text-gray-700">Active Clients</h3>
-                <p id="active-clients" class="text-3xl font-bold text-blue-600">-</p>
-            </div>
-            <div class="bg-white rounded-lg shadow p-6">
-                <h3 class="text-lg font-semibold text-gray-700">Active Services</h3>
-                <p id="active-services" class="text-3xl font-bold text-green-600">-</p>
-            </div>
-            <div class="bg-white rounded-lg shadow p-6">
-                <h3 class="text-lg font-semibold text-gray-700">Total Requests</h3>
-                <p id="total-requests" class="text-3xl font-bold text-purple-600">-</p>
-            </div>
-            <div class="bg-white rounded-lg shadow p-6">
-                <h3 class="text-lg font-semibold text-gray-700">Active Connections</h3>
-                <p id="active-connections" class="text-3xl font-bold text-red-600">-</p>
-            </div>
-        </div>
-
-        <!-- Services Table -->
-        <div class="bg-white rounded-lg shadow mb-8">
-            <div class="px-6 py-4 border-b">
-                <h2 class="text-xl font-semibold text-gray-800">Active Services</h2>
-            </div>
-            <div class="overflow-x-auto">
-                <table class="w-full">
-                    <thead class="bg-gray-50">
-                        <tr>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Subdomain</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Local Port</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Services</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Requests</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="services-table" class="bg-white divide-y divide-gray-200">
-                        <!-- Services will be loaded here -->
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- Charts -->
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div class="bg-white rounded-lg shadow p-6" style=" height: 400px;">
-                <h3 class="text-lg font-semibold text-gray-700 mb-4">Request Traffic</h3>
-                <canvas id="traffic-chart"  height="400"></canvas>
-            </div>
-            <div class="bg-white rounded-lg shadow p-6" style=" height: 400px;">
-                <h3 class="text-lg font-semibold text-gray-700 mb-4">Connection Types</h3>
-                <canvas id="connections-chart"  height="400"></canvas>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        // Dashboard functionality
-        async function loadStats() {
-            try {
-                const response = await fetch('/api/stats');
-                const data = await response.json();
-
-                document.getElementById('active-clients').textContent = data.active_clients;
-                document.getElementById('active-services').textContent = data.active_services;
-                document.getElementById('total-requests').textContent = data.total_requests;
-                document.getElementById('active-connections').textContent =
-                    data.active_websockets + data.active_sse;
-
-                loadServicesTable(data.services);
-                updateCharts(data);
-            } catch (error) {
-                console.error('Failed to load stats:', error);
-            }
+        status_data = {
+            'status': 'running',
+            'platform': 'unlimited',
+            'mode': 'UNLIMITED_CAPACITY',
+            'uptime_seconds': uptime,
+            'active_tunnels': len(self.registry.tunnels),
+            'active_connections': self.metrics.active_connections,
+            'total_requests': self.metrics.request_count,
+            'total_bytes': self.metrics.bytes_transferred,
+            'error_rate': self.metrics.error_count / max(self.metrics.request_count, 1),
+            'avg_response_time': sum(self.metrics.response_times) / max(len(self.metrics.response_times), 1),
+            'throughput_mbps': self.metrics.get_throughput(),
+            'limits': {
+                'max_tunnels': 'UNLIMITED',
+                'request_timeout': 'UNLIMITED',
+                'max_body_size': 'UNLIMITED (100TB+)',
+                'rate_limit': 'DISABLED'
+            },
+            'tunnels': tunnels_info
         }
 
-        function loadServicesTable(services) {
-            const tbody = document.getElementById('services-table');
-            tbody.innerHTML = services.map(service => `
-                <tr>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                        <a href="https://${service.subdomain}.${window.location.hostname}"
-                           target="_blank" class="text-blue-600 hover:underline">
-                            ${service.subdomain}
-                        </a>
-                    </td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${service.local_port}</td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                        <span class="inline-flex space-x-1">
-                            ${service.service_types.map(type =>
-                                `<span class="px-2 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded-full">${type}</span>`
-                            ).join('')}
-                        </span>
-                    </td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">${service.request_count || 0}</td>
-                    <td class="px-6 py-4 whitespace-nowrap">
-                        <span class="inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
-                            service.is_active ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-                        }">
-                            ${service.is_active ? 'Active' : 'Inactive'}
-                        </span>
-                    </td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                        <button onclick="testService('${service.subdomain}')"
-                                class="text-blue-600 hover:text-blue-900 mr-3">Test</button>
-                        <button onclick="viewLogs('${service.id}')"
-                                class="text-green-600 hover:text-green-900">Logs</button>
-                    </td>
-                </tr>
-            `).join('');
-        }
+        return web.json_response(status_data)
 
-        function updateCharts(data) {
-            // Traffic chart
-            const trafficCtx = document.getElementById('traffic-chart').getContext('2d');
-            new Chart(trafficCtx, {
-                type: 'line',
-                data: {
-                    labels: ['1h', '2h', '3h', '4h', '5h', '6h'],
-                    datasets: [{
-                        label: 'Requests',
-                        data: [12, 19, 3, 5, 2, 3],
-                        borderColor: 'rgb(59, 130, 246)',
-                        backgroundColor: 'rgba(59, 130, 246, 0.1)',
-                        tension: 0.4
-                    }]
-                },
-                options: { responsive: true, maintainAspectRatio: false }
-            });
+    async def _metrics_handler(self, request: Request) -> Response:
+        """Prometheus-compatible metrics endpoint"""
+        metrics_text = f"""# HELP tunnel_server_uptime_seconds Server uptime
+tunnel_server_uptime_seconds {time.time() - self.metrics.start_time}
 
-            // Connections chart
-            const connCtx = document.getElementById('connections-chart').getContext('2d');
-            new Chart(connCtx, {
-                type: 'doughnut',
-                data: {
-                    labels: ['HTTP', 'WebSocket', 'SSE'],
-                    datasets: [{
-                        data: [data.total_requests || 0, data.active_websockets || 0, data.active_sse || 0],
-                        backgroundColor: ['#3B82F6', '#10B981', '#F59E0B']
-                    }]
-                },
-                options: { responsive: true, maintainAspectRatio: false }
-            });
-        }
+# HELP tunnel_server_active_tunnels Number of active tunnels
+tunnel_server_active_tunnels {len(self.registry.tunnels)}
 
-        async function testService(subdomain) {
-            try {
-                const url = `https://${subdomain}.${window.location.hostname}`;
-                const response = await fetch(url);
-                alert(`Service test: ${response.status} ${response.statusText}`);
-            } catch (error) {
-                alert(`Service test failed: ${error.message}`);
-            }
-        }
+# HELP tunnel_server_requests_total Total requests processed
+tunnel_server_requests_total {self.metrics.request_count}
 
-        function viewLogs(serviceId) {
-            window.open(`/api/logs/${serviceId}`, '_blank');
-        }
+# HELP tunnel_server_bytes_transferred_total Total bytes transferred
+tunnel_server_bytes_transferred_total {self.metrics.bytes_transferred}
 
-        // Auto-refresh every 5 seconds
-        loadStats();
-        setInterval(loadStats, 5000);
-    </script>
-</body>
-</html>
+# HELP tunnel_server_error_rate Request error rate
+tunnel_server_error_rate {self.metrics.error_count / max(self.metrics.request_count, 1)}
+
+# HELP tunnel_server_mode Server operation mode
+tunnel_server_mode{{mode="unlimited"}} 1
+
 """
+        return web.Response(text=metrics_text, content_type='text/plain')
 
-    async def _api_handler(self, request: Request) -> Response:
-        """Handle API requests"""
-        path = request.path[5:]  # Remove '/api/'
+    async def _cleanup_stale_connections(self):
+        """Clean up stale connections - very generous timeouts"""
+        while self.running:
+            await asyncio.sleep(300)  # Run every 5 minutes
+            current_time = time.time()
 
-        if path == 'stats':
-            return await self._api_stats(request)
-        elif path.startswith('logs/'):
-            service_id = path[5:]
-            return await self._api_logs(request, service_id)
-        else:
-            return web.json_response({'error': 'Not found'}, status=404)
+            # Clean up very stale tunnels (no heartbeat for 24 hours)
+            stale_tunnels = [
+                tid for tid, tunnel in self.registry.tunnels.items()
+                if current_time - tunnel['last_seen'] > 86400  # 24 hours
+            ]
 
-    async def _api_stats(self, request: Request) -> Response:
-        """API endpoint for stats"""
-        async with self.db.get_session() as session:
-            # Get detailed service information
-            services_result = await session.execute(
-                select(TunnelService).where(TunnelService.is_active == True)
-            )
-            services = services_result.scalars().all()
+            for tunnel_id in stale_tunnels:
+                self.registry.unregister_tunnel(tunnel_id)
+                logger.info(f"[CLEANUP] Cleaned up stale tunnel: {tunnel_id}")
 
-            services_data = []
-            for service in services:
-                services_data.append({
-                    'id': service.id,
-                    'subdomain': service.subdomain,
-                    'local_port': service.local_port,
-                    'service_types': service.service_types,
-                    'request_count': service.request_count,
-                    'is_active': service.is_active,
-                    'detected_framework': service.detected_framework
-                })
-
-            return web.json_response({
-                'active_clients': len(self.websocket_connections),
-                'active_services': len(services),
-                'total_requests': sum(s.request_count for s in services),
-                'active_websockets': len([s for s in self.active_sessions.values() if s['type'] == 'websocket']),
-                'active_sse': len([s for s in self.active_sessions.values() if s['type'] == 'sse']),
-                'services': services_data
-            })
-
-    async def _api_logs(self, request: Request, service_id: str) -> Response:
-        """API endpoint for service logs"""
-        async with self.db.get_session() as session:
-            logs_result = await session.execute(
-                select(RequestLog)
-                .where(RequestLog.service_id == service_id)
-                .order_by(RequestLog.timestamp.desc())
-                .limit(100)
-            )
-            logs = logs_result.scalars().all()
-
-            logs_data = []
-            for log in logs:
-                logs_data.append({
-                    'timestamp': log.timestamp.isoformat(),
-                    'method': log.method,
-                    'path': log.path,
-                    'status_code': log.status_code,
-                    'response_time': log.response_time,
-                    'remote_ip': log.remote_ip
-                })
-
-            return web.json_response({'logs': logs_data})
-
-    async def _cleanup_client(self, client_id: str):
-        """Cleanup client resources"""
-        self.websocket_connections.pop(client_id, None)
-
-        # Clean up active sessions
-        sessions_to_remove = [
-            sid for sid, session in self.active_sessions.items()
-            if session['client_id'] == client_id
-        ]
-        for session_id in sessions_to_remove:
-            self.active_sessions.pop(session_id, None)
-
-        # Update database
-        async with self.db.get_session() as session:
-            await session.execute(
-                update(TunnelClient)
-                .where(TunnelClient.id == client_id)
-                .values(is_active=False)
-            )
-            await session.commit()
-
-    def setup_routes(self):
-        """Setup routes with CORS - FIXED MIDDLEWARE"""
-        app = web.Application()
-
-        # FIXED CORS middleware with correct signature
-        @web.middleware
-        async def cors_middleware(request, handler):
-            if request.method == 'OPTIONS':
-                response = web.Response()
-            else:
-                try:
-                    response = await handler(request)
-                except web.HTTPException as ex:
-                    response = web.Response(
-                        text=str(ex),
-                        status=ex.status,
-                        headers={'Content-Type': 'text/plain'}
-                    )
-
-            # Add CORS headers
-            response.headers.update({
-                'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS',
-                'Access-Control-Allow-Headers': '*',
-                'Access-Control-Allow-Credentials': 'true',
-                'Access-Control-Expose-Headers': '*'
-            })
-            return response
-
-        app.middlewares.append(cors_middleware)
-
-        # Add specific routes
-        app.router.add_get('/ws', self.websocket_handler)
-        app.router.add_get('/status', self.status_handler)
-        app.router.add_get('/health', self.health_handler)
-        app.router.add_get('/metrics', self.metrics_handler)
-        app.router.add_get('/favicon.ico', self.favicon_handler)
-        app.router.add_get('/robots.txt', self.robots_handler)
-
-        # Add catch-all for all HTTP methods
-        methods = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD']
-        for method in methods:
-            app.router.add_route(method, '/{path:.*}', self.handle_request)
-
-        return app
-
-
-    async def start(self):
-        """Start server - FIXED"""
+    async def start_server(self):
+        """Start the ultra high-performance tunnel server"""
         self.running = True
-        app = self.setup_routes()  # This now calls the fixed setup_routes method
 
+        # Create aiohttp application with UNLIMITED settings
+        app = web.Application(
+            client_max_size=None  # UNLIMITED body size (100TB+)
+        )
+
+        # Setup CORS without conflicts
+        cors = aiohttp_cors.setup(app, defaults={
+            "*": aiohttp_cors.ResourceOptions(
+                allow_credentials=True,
+                expose_headers="*",
+                allow_headers="*",
+                allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
+            )
+        })
+
+        # Add WebSocket route
+        ws_route = app.router.add_get('/ws', self.websocket_handler)
+        cors.add(ws_route)
+
+        # Add specific server routes
+        status_route = app.router.add_get('/status', self._status_handler)
+        health_route = app.router.add_get('/health', lambda r: web.json_response({
+            'status': 'healthy', 'timestamp': time.time(), 'platform': 'unlimited'
+        }))
+        metrics_route = app.router.add_get('/metrics', self._metrics_handler)
+
+        cors.add(status_route)
+        cors.add(health_route)
+        cors.add(metrics_route)
+
+        # Add catch-all route for tunnel traffic
+        methods_to_register = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD']
+        for method in methods_to_register:
+            route = app.router.add_route(method, '/{path:.*}', self.http_handler)
+            cors.add(route)
+
+        # Start cleanup task
+        self.cleanup_tasks.append(asyncio.create_task(self._cleanup_stale_connections()))
+
+        # Create and start server
         runner = web.AppRunner(app)
         await runner.setup()
-
         site = web.TCPSite(runner, self.host, self.port)
         await site.start()
 
-        domain = self._normalize_domain(self.domain)
-        base_url = f"{self.protocol}://{domain}"
+        base_url = f"{self.protocol}://{self.domain}"
         if self.port not in [80, 443]:
             base_url += f":{self.port}"
 
-        logger.info("🎉 Universal Tunnel Server v3.0 Started!")
-        logger.info(f"📡 Listening: {self.host}:{self.port}")
-        logger.info(f"🌐 Public Domain: {base_url}")
-        logger.info(f"🔗 WebSocket Control: {base_url}/ws")
-        logger.info(f"📊 Status: {base_url}/status")
-        logger.info(f"✅ Universal Support: WebSocket, SSE, HTTP for ALL frameworks")
+        logger.info("[START] " + "=" * 80)
+        logger.info("[START] ULTRA HIGH-PERFORMANCE TUNNEL SERVER STARTED!")
+        logger.info("[START] MODE: UNLIMITED CAPACITY - NO TIMEOUTS - 100TB+ SUPPORT")
+        logger.info(f"[START] Server: {self.host}:{self.port}")
+        logger.info(f"[START] Domain: {base_url}")
+        logger.info(f"[START] WebSocket: {self.ws_protocol}://{self.domain}:{self.port}/ws")
+        logger.info(f"[START] Status: {base_url}/status")
+        logger.info("[START] " + "=" * 80)
 
         return runner
 
+    async def stop_server(self):
+        """Stop server gracefully"""
+        self.running = False
+
+        # Cancel cleanup tasks
+        for task in self.cleanup_tasks:
+            task.cancel()
+
+        # Close all tunnels
+        for tunnel_id in list(self.registry.tunnels.keys()):
+            self.registry.unregister_tunnel(tunnel_id)
+
+        logger.info("[STOP] Ultra tunnel server stopped gracefully")
+
 async def main():
+    """Main server entry point"""
     import argparse
-    parser = argparse.ArgumentParser(description='Universal Tunnel Server v4.0')
-    parser.add_argument('--host', default=os.getenv('HOST', '0.0.0.0'))
-    parser.add_argument('--port', type=int, default=int(os.getenv('PORT', 8080)))
-    parser.add_argument('--domain', default=os.getenv('DOMAIN', 'localhost'))
+
+    parser = argparse.ArgumentParser(description='Ultra High-Performance Tunnel Server')
+    parser.add_argument('--host', default=os.environ.get('HOST', '0.0.0.0'),
+                       help='Host to bind to')
+    parser.add_argument('--port', type=int, default=int(os.environ.get('PORT', 8080)),
+                       help='Port to bind to')
+    parser.add_argument('--domain', default=os.environ.get('DOMAIN', 'localhost'),
+                       help='Public domain name')
+    parser.add_argument('--verbose', '-v', action='store_true',
+                       help='Enable verbose logging')
+
     args = parser.parse_args()
 
-    server = UniversalTunnelServer(args.host, args.port, args.domain)
-    runner = None
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
 
+    server = UltraHighPerformanceTunnelServer(
+        host=args.host,
+        port=args.port,
+        domain=args.domain
+    )
+
+    runner = None
     try:
-        runner = await server.start()
+        runner = await server.start_server()
+        # Keep running until interrupted
         await asyncio.Event().wait()
-    except KeyboardInterrupt:
-        logger.info("👋 Shutting down...")
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        logger.info("[MAIN] Shutdown signal received")
     finally:
         if runner:
+            await server.stop_server()
             await runner.cleanup()
-        await server.db.close()
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("[MAIN] Server stopped by user")
