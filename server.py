@@ -240,16 +240,16 @@ class UltraHighPerformanceTunnelServer:
             logger.info("[SSL] Auto-detection disabled")
             return False
 
+        # For Render and other cloud platforms, enable SSL but don't create SSL context
+        # The platform handles SSL termination at the edge
         if '.onrender.com' in self.domain:
-            logger.info("[SSL] Disabled - Render handles SSL termination")
-            return False  # Changed from True to False
+            logger.info("[SSL] Enabled - Render platform detected (edge SSL termination)")
+            return True  # Changed from False to True
 
-        # Check for environment variables (but skip on Render)
+        # Check for environment variables
         if os.environ.get('HTTPS') == 'true' or os.environ.get('USE_SSL') == 'true':
-            # Only enable if not on Render
-            if '.onrender.com' not in self.domain:
-                logger.info("[SSL] Enabled via environment variables")
-                return True
+            logger.info("[SSL] Enabled via environment variables")
+            return True
 
         # Check for cloud platform specific environments
         cloud_indicators = ['RENDER', 'HEROKU', 'RAILWAY', 'VERCEL', 'NETLIFY', 'FLY_IO']
@@ -315,6 +315,14 @@ class UltraHighPerformanceTunnelServer:
     def _create_ssl_context(self) -> Optional[ssl.SSLContext]:
         """Create SSL context if certificates are available"""
         try:
+            # For cloud platforms, don't create SSL context - they handle it at the edge
+            cloud_platforms = ['.onrender.com', '.herokuapp.com', '.netlify.app',
+                            '.vercel.app', '.railway.app', '.fly.dev']
+
+            if any(platform in self.domain for platform in cloud_platforms):
+                logger.info("[SSL] No SSL context needed - platform handles SSL termination")
+                return None
+
             if not self.ssl_cert or not self.ssl_key:
                 logger.info("[SSL] No certificates specified, relying on reverse proxy SSL")
                 return None
