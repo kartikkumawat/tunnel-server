@@ -234,158 +234,83 @@ class UltraHighPerformanceTunnelServer:
             return urlparse(domain).netloc
         return domain
 
-
     def _detect_ssl_setup(self) -> bool:
-        """Enhanced SSL auto-detection with comprehensive certificate search"""
-
-        cloud_cert_locations = [
-                # Docker container mounts
-                ('/var/run/secrets/cert.pem', '/var/run/secrets/key.pem'),
-                ('/etc/secrets/cert.pem', '/etc/secrets/key.pem'),
-                ('/app/certs/cert.pem', '/app/certs/key.pem'),
-
-                # Kubernetes secrets
-                ('/var/run/secrets/tls/tls.crt', '/var/run/secrets/tls/tls.key'),
-                ('/etc/ssl-certs/tls.crt', '/etc/ssl-certs/tls.key'),
-
-                # Railway specific
-                ('/app/ssl/cert.pem', '/app/ssl/key.pem'),
-
-                # Heroku/Render buildpack locations
-                ('/app/certificates/cert.pem', '/app/certificates/key.pem'),
-                ('/home/app/certs/cert.pem', '/home/app/certs/key.pem'),
-
-                # AWS/GCP mounted secrets
-                ('/mnt/secrets/cert.pem', '/mnt/secrets/key.pem'),
-                ('/secrets/ssl/cert.pem', '/secrets/ssl/key.pem'),
-            ]
-
-        cert_locations = [
-                # Standard system locations
-                ('/etc/ssl/certs/server.crt', '/etc/ssl/private/server.key'),
-                ('/etc/ssl/certs/cert.pem', '/etc/ssl/private/key.pem'),
-                ('/etc/ssl/certs/ssl-cert.pem', '/etc/ssl/private/ssl-cert.key'),
-
-                # Let's Encrypt (all common patterns)
-                ('/etc/letsencrypt/live/*/fullchain.pem', '/etc/letsencrypt/live/*/privkey.pem'),
-                ('/etc/letsencrypt/live/*/cert.pem', '/etc/letsencrypt/live/*/privkey.pem'),
-
-                # Apache default locations
-                ('/etc/apache2/ssl/server.crt', '/etc/apache2/ssl/server.key'),
-                ('/etc/httpd/ssl/server.crt', '/etc/httpd/ssl/server.key'),
-                ('/etc/ssl/apache2/server.crt', '/etc/ssl/apache2/server.key'),
-
-                # Nginx default locations
-                ('/etc/nginx/ssl/server.crt', '/etc/nginx/ssl/server.key'),
-                ('/etc/ssl/nginx/server.crt', '/etc/ssl/nginx/server.key'),
-
-                # CentOS/RHEL/Fedora
-                ('/etc/pki/tls/certs/server.crt', '/etc/pki/tls/private/server.key'),
-                ('/etc/pki/tls/certs/localhost.crt', '/etc/pki/tls/private/localhost.key'),
-
-                # FreeBSD
-                ('/usr/local/etc/ssl/server.crt', '/usr/local/etc/ssl/server.key'),
-
-                # macOS
-                ('/etc/certificates/server.crt', '/etc/certificates/server.key'),
-                ('/usr/local/etc/openssl/certs/server.crt', '/usr/local/etc/openssl/private/server.key'),
-            ]
-
-        local_cert_locations = [
-                # Current directory variations
-                ('./cert.pem', './key.pem'),
-                ('./server.crt', './server.key'),
-                ('./certificate.crt', './private.key'),
-                ('./fullchain.pem', './privkey.pem'),
-
-                # SSL subdirectory
-                ('./ssl/cert.pem', './ssl/key.pem'),
-                ('./ssl/server.crt', './ssl/server.key'),
-                ('./ssl/certificate.crt', './ssl/private.key'),
-                ('./ssl/fullchain.pem', './ssl/privkey.pem'),
-
-                # Certs subdirectory
-                ('./certs/cert.pem', './certs/key.pem'),
-                ('./certs/server.crt', './certs/server.key'),
-                ('./certs/certificate.crt', './certs/private.key'),
-                ('./certs/fullchain.pem', './certs/privkey.pem'),
-
-                # Certificates subdirectory
-                ('./certificates/cert.pem', './certificates/key.pem'),
-                ('./certificates/server.crt', './certificates/server.key'),
-
-                # TLS subdirectory
-                ('./tls/cert.pem', './tls/key.pem'),
-                ('./tls/server.crt', './tls/server.key'),
-
-                # Config subdirectory
-                ('./config/cert.pem', './config/key.pem'),
-                ('./config/ssl/cert.pem', './config/ssl/key.pem'),
-            ]
-
-
-
+        """Auto-detect SSL configuration based on environment and certificates"""
         if not self.auto_detect_ssl:
             logger.info("[SSL] Auto-detection disabled")
             return False
 
-        # Force SSL for known HTTPS-only platforms
         if '.onrender.com' in self.domain:
-            logger.info("[SSL] Enabled - Render deployment detected")
+            logger.info("[SSL] Disabled - Render handles SSL termination")
+            return False  # Changed from True to False
+
+        # Check for environment variables (but skip on Render)
+        if os.environ.get('HTTPS') == 'true' or os.environ.get('USE_SSL') == 'true':
+            # Only enable if not on Render
+            if '.onrender.com' not in self.domain:
+                logger.info("[SSL] Enabled via environment variables")
+                return True
+
+        # Check for cloud platform specific environments
+        cloud_indicators = ['RENDER', 'HEROKU', 'RAILWAY', 'VERCEL', 'NETLIFY', 'FLY_IO']
+        detected_platform = None
+        for indicator in cloud_indicators:
+            if os.environ.get(indicator):
+                detected_platform = indicator
+                break
+
+        if detected_platform:
+            logger.info(f"[SSL] Enabled - detected {detected_platform} environment")
             return True
 
-        # Environment variable checks
-        ssl_env_vars = ['HTTPS', 'USE_SSL', 'SSL_ENABLED', 'TLS_ENABLED']
-        for var in ssl_env_vars:
-            if os.environ.get(var, '').lower() in ['true', '1', 'on', 'yes']:
-                logger.info(f"[SSL] Enabled via {var} environment variable")
+        # Check for certificate files
+        if self.ssl_cert and self.ssl_key:
+            if os.path.exists(self.ssl_cert) and os.path.exists(self.ssl_key):
+                logger.info("[SSL] Enabled via certificate files")
                 return True
-
-        # Cloud platform detection
-        cloud_indicators = {
-            'RENDER': '.onrender.com',
-            'HEROKU': '.herokuapp.com',
-            'RAILWAY': '.railway.app',
-            'VERCEL': '.vercel.app',
-            'NETLIFY': '.netlify.app',
-            'FLY_IO': '.fly.dev'
-        }
-
-        for platform, domain_suffix in cloud_indicators.items():
-            if os.environ.get(platform) or domain_suffix in self.domain:
-                logger.info(f"[SSL] Enabled - {platform} environment detected")
-                return True
-
-        # Comprehensive certificate search
-        all_locations = cert_locations + local_cert_locations + cloud_cert_locations
-
-        for cert_path, key_path in all_locations:
-            # Handle wildcard paths for Let's Encrypt
-            if '*' in cert_path:
-                import glob
-                cert_matches = glob.glob(cert_path)
-                key_matches = glob.glob(key_path)
-                for cert, key in zip(cert_matches, key_matches):
-                    if os.path.exists(cert) and os.path.exists(key):
-                        self.ssl_cert = cert
-                        self.ssl_key = key
-                        logger.info(f"[SSL] Found certificates: {cert} and {key}")
-                        return True
             else:
+                logger.warning("[SSL] Certificate files specified but not found")
+
+        # Check for common certificate locations
+        common_cert_paths = [
+            '/etc/ssl/certs/server.crt',
+            '/etc/letsencrypt/live/*/fullchain.pem',
+            './ssl/cert.pem',
+            './cert.pem',
+            'fullchain.pem'
+        ]
+
+        common_key_paths = [
+            '/etc/ssl/private/server.key',
+            '/etc/letsencrypt/live/*/privkey.pem',
+            './ssl/key.pem',
+            './key.pem',
+            'privkey.pem'
+        ]
+
+        for cert_path in common_cert_paths:
+            for key_path in common_key_paths:
                 if os.path.exists(cert_path) and os.path.exists(key_path):
                     self.ssl_cert = cert_path
                     self.ssl_key = key_path
-                    logger.info(f"[SSL] Found certificates: {cert_path} and {key_path}")
+                    logger.info(f"[SSL] Enabled - found certificates at {cert_path} and {key_path}")
                     return True
 
-        # Port-based detection
+        # Check if running on standard HTTPS port
         if self.port == 443:
-            logger.info("[SSL] Enabled - running on HTTPS port 443")
+            logger.info("[SSL] Enabled - running on port 443")
             return True
 
-        logger.info("[SSL] Disabled - no SSL configuration found")
-        return False
+        # Check if domain suggests HTTPS
+        https_domains = ['.onrender.com', '.herokuapp.com', '.netlify.app', '.vercel.app',
+                        '.railway.app', '.fly.dev']
+        for https_domain in https_domains:
+            if https_domain in self.domain:
+                logger.info(f"[SSL] Enabled - detected HTTPS-enabled domain: {self.domain}")
+                return True
 
+        logger.info("[SSL] Disabled - no SSL configuration detected")
+        return False
 
     def _create_ssl_context(self) -> Optional[ssl.SSLContext]:
         """Create SSL context if certificates are available"""
