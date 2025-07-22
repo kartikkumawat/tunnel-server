@@ -911,7 +911,7 @@ async def main():
         domain=args.domain,
         ssl_cert=args.ssl_cert,
         ssl_key=args.ssl_key,
-        auto_detect_ssl=not args.no_auto_ssl
+        auto_detect_ssl=False
     )
 
     runner = None
