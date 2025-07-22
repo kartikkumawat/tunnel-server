@@ -240,30 +240,34 @@ class UltraHighPerformanceTunnelServer:
             logger.info("[SSL] Auto-detection disabled")
             return False
 
-        cloud_platforms_with_ssl_termination = ['.onrender.com', '.herokuapp.com', '.netlify.app', '.vercel.app']
-        for platform in cloud_platforms_with_ssl_termination:
-            if platform in self.domain:
-                logger.info(f"[SSL] Disabled - {platform} handles SSL termination")
-                return False
+        # For cloud platforms, DISABLE SSL at application level
+        # The platform handles SSL termination at the edge
+        cloud_platforms = ['.onrender.com', '.herokuapp.com', '.netlify.app',
+                        '.vercel.app', '.railway.app', '.fly.dev']
 
-        # Check for environment variables
-        if os.environ.get('HTTPS') == 'true' or os.environ.get('USE_SSL') == 'true':
-            logger.info("[SSL] Enabled via environment variables")
-            return True
+        if any(platform in self.domain for platform in cloud_platforms):
+            logger.info(f"[SSL] Disabled - Cloud platform detected (edge SSL termination)")
+            return False
 
-        # Check for cloud platform specific environments
-        cloud_indicators = ['RAILWAY', 'FLY_IO']
+        # Check for cloud platform environment variables
+        cloud_env_vars = ['RENDER', 'HEROKU_APP_NAME', 'RAILWAY_ENVIRONMENT',
+                        'VERCEL', 'NETLIFY', 'FLY_APP_NAME']
         detected_platform = None
-        for indicator in cloud_indicators:
-            if os.environ.get(indicator):
-                detected_platform = indicator
+        for env_var in cloud_env_vars:
+            if os.environ.get(env_var):
+                detected_platform = env_var
                 break
 
         if detected_platform:
-            logger.info(f"[SSL] Enabled - detected {detected_platform} environment")
+            logger.info(f"[SSL] Disabled - detected {detected_platform} environment (edge SSL termination)")
+            return False
+
+        # Only enable SSL if explicitly requested via environment variables
+        if os.environ.get('FORCE_SSL') == 'true' or os.environ.get('USE_SSL') == 'true':
+            logger.info("[SSL] Enabled via environment variables")
             return True
 
-        # Check for certificate files
+        # Check for certificate files (only for self-hosted deployments)
         if self.ssl_cert and self.ssl_key:
             if os.path.exists(self.ssl_cert) and os.path.exists(self.ssl_key):
                 logger.info("[SSL] Enabled via certificate files")
@@ -271,7 +275,7 @@ class UltraHighPerformanceTunnelServer:
             else:
                 logger.warning("[SSL] Certificate files specified but not found")
 
-        # Check for common certificate locations
+        # Check for common certificate locations (only for self-hosted)
         common_cert_paths = [
             '/etc/ssl/certs/server.crt',
             '/etc/letsencrypt/live/*/fullchain.pem',
@@ -296,7 +300,7 @@ class UltraHighPerformanceTunnelServer:
                     logger.info(f"[SSL] Enabled - found certificates at {cert_path} and {key_path}")
                     return True
 
-        # Check if running on standard HTTPS port
+        # Check if running on standard HTTPS port (only for self-hosted)
         if self.port == 443:
             logger.info("[SSL] Enabled - running on port 443")
             return True
@@ -305,9 +309,9 @@ class UltraHighPerformanceTunnelServer:
         return False
 
     def _create_ssl_context(self) -> Optional[ssl.SSLContext]:
-        """Create SSL context if certificates are available"""
+        """Create SSL context only for self-hosted deployments"""
         try:
-            # For cloud platforms, don't create SSL context - they handle it at the edge
+            # For cloud platforms, never create SSL context - they handle it at the edge
             cloud_platforms = ['.onrender.com', '.herokuapp.com', '.netlify.app',
                             '.vercel.app', '.railway.app', '.fly.dev']
 
@@ -315,12 +319,19 @@ class UltraHighPerformanceTunnelServer:
                 logger.info("[SSL] No SSL context needed - platform handles SSL termination")
                 return None
 
+            # Check for cloud environment variables
+            cloud_env_vars = ['RENDER', 'HEROKU_APP_NAME', 'RAILWAY_ENVIRONMENT',
+                            'VERCEL', 'NETLIFY', 'FLY_APP_NAME']
+            if any(os.environ.get(env_var) for env_var in cloud_env_vars):
+                logger.info("[SSL] No SSL context needed - cloud environment detected")
+                return None
+
             if not self.ssl_cert or not self.ssl_key:
-                logger.info("[SSL] No certificates specified, relying on reverse proxy SSL")
+                logger.info("[SSL] No certificates specified")
                 return None
 
             if not (os.path.exists(self.ssl_cert) and os.path.exists(self.ssl_key)):
-                logger.warning("[SSL] Certificate files not found, SSL context not created")
+                logger.warning("[SSL] Certificate files not found")
                 return None
 
             context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
@@ -343,7 +354,7 @@ class UltraHighPerformanceTunnelServer:
             return False
 
     def get_public_url(self, subdomain: str) -> str:
-        """Generate public URL for subdomain with SSL support"""
+        """Generate public URL for subdomain with cloud platform SSL support"""
         # Handle the case where domain includes protocol
         domain = self.domain
         if domain.startswith('http://') or domain.startswith('https://'):
@@ -354,14 +365,15 @@ class UltraHighPerformanceTunnelServer:
             else:
                 domain = parsed.hostname
 
-        # For deployment platforms, use the provided domain directly
+        # For cloud platforms, ALWAYS use HTTPS in public URLs
+        # even though the app runs on HTTP internally
         cloud_platforms = ['.onrender.com', '.herokuapp.com', '.netlify.app',
-                      '.vercel.app', '.railway.app', '.fly.dev']
+                        '.vercel.app', '.railway.app', '.fly.dev']
 
         if any(platform in domain for platform in cloud_platforms):
             return f"https://{subdomain}.{domain}"
 
-        # For custom domains with subdomains
+        # For self-hosted deployments, use the actual protocol
         port_str = ""
         if (self.use_ssl and self.port != 443) or (not self.use_ssl and self.port != 80):
             port_str = f":{self.port}"
@@ -377,11 +389,14 @@ class UltraHighPerformanceTunnelServer:
             if parsed.port:
                 domain = f"{parsed.hostname}:{parsed.port}"
 
-        # For deployment platforms
-        if any(platform in domain for platform in ['.onrender.com', '.herokuapp.com']):
+        # For cloud platforms, use WSS even if app runs on WS internally
+        cloud_platforms = ['.onrender.com', '.herokuapp.com', '.netlify.app',
+                        '.vercel.app', '.railway.app', '.fly.dev']
+
+        if any(platform in domain for platform in cloud_platforms):
             return f"wss://{domain}/ws"
 
-        # For custom domains
+        # For self-hosted deployments, use the actual WebSocket protocol
         port_str = ""
         if (self.use_ssl and self.port != 443) or (not self.use_ssl and self.port != 80):
             port_str = f":{self.port}"
@@ -911,7 +926,7 @@ async def main():
         domain=args.domain,
         ssl_cert=args.ssl_cert,
         ssl_key=args.ssl_key,
-        auto_detect_ssl=False
+        auto_detect_ssl=not args.no_auto_ssl
     )
 
     runner = None
