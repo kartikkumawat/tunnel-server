@@ -301,14 +301,6 @@ class UltraHighPerformanceTunnelServer:
             logger.info("[SSL] Enabled - running on port 443")
             return True
 
-        # Check if domain suggests HTTPS
-        https_domains = ['.onrender.com', '.herokuapp.com', '.netlify.app', '.vercel.app',
-                        '.railway.app', '.fly.dev']
-        for https_domain in https_domains:
-            if https_domain in self.domain:
-                logger.info(f"[SSL] Enabled - detected HTTPS-enabled domain: {self.domain}")
-                return True
-
         logger.info("[SSL] Disabled - no SSL configuration detected")
         return False
 
