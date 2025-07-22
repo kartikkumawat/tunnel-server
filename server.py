@@ -349,11 +349,16 @@ class UltraHighPerformanceTunnelServer:
         if domain.startswith('http://') or domain.startswith('https://'):
             parsed = urlparse(domain)
             domain = parsed.netloc
-            if parsed.port:
+            if parsed.port and parsed.port not in (80, 443):
                 domain = f"{parsed.hostname}:{parsed.port}"
+            else:
+                domain = parsed.hostname
 
         # For deployment platforms, use the provided domain directly
-        if any(platform in domain for platform in ['.onrender.com', '.herokuapp.com', '.netlify.app', '.vercel.app']):
+        cloud_platforms = ['.onrender.com', '.herokuapp.com', '.netlify.app',
+                      '.vercel.app', '.railway.app', '.fly.dev']
+
+        if any(platform in domain for platform in cloud_platforms):
             return f"https://{subdomain}.{domain}"
 
         # For custom domains with subdomains
