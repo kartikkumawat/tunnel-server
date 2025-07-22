@@ -240,11 +240,11 @@ class UltraHighPerformanceTunnelServer:
             logger.info("[SSL] Auto-detection disabled")
             return False
 
-        # For Render and other cloud platforms, enable SSL but don't create SSL context
-        # The platform handles SSL termination at the edge
-        if '.onrender.com' in self.domain:
-            logger.info("[SSL] Enabled - Render platform detected (edge SSL termination)")
-            return True  # Changed from False to True
+        cloud_platforms_with_ssl_termination = ['.onrender.com', '.herokuapp.com', '.netlify.app', '.vercel.app']
+        for platform in cloud_platforms_with_ssl_termination:
+            if platform in self.domain:
+                logger.info(f"[SSL] Disabled - {platform} handles SSL termination")
+                return False
 
         # Check for environment variables
         if os.environ.get('HTTPS') == 'true' or os.environ.get('USE_SSL') == 'true':
@@ -252,7 +252,7 @@ class UltraHighPerformanceTunnelServer:
             return True
 
         # Check for cloud platform specific environments
-        cloud_indicators = ['RENDER', 'HEROKU', 'RAILWAY', 'VERCEL', 'NETLIFY', 'FLY_IO']
+        cloud_indicators = ['RAILWAY', 'FLY_IO']
         detected_platform = None
         for indicator in cloud_indicators:
             if os.environ.get(indicator):
